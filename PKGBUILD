@@ -16,15 +16,15 @@ optdepends=('dosfstools: ISO building'
             'mtools: ISO building'
             'squashfs-tools: ISO building'
             'go-yq: ISO building')
-source=("sartools-${pkgver}.tar.gz::https://github.com/gt-ayush/sartools/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+source=()
+sha256sums=()
 
 build() {
-    cd "sartools-${pkgver}"
+    cd "$startdir"
     make PREFIX=/usr SYSCONFDIR=/etc
 }
 
 package() {
-    cd "sartools-${pkgver}"
+    cd "$startdir"
     make DESTDIR="${pkgdir}" PREFIX=/usr SYSCONFDIR=/etc install
 }
