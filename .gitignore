@@ -7,8 +7,8 @@ data/schemas/*.conf
 iso-profiles
 live-services
 artixpkg_cmds
-PKGBUILD
 
+graphify-out/
 contrib/artixlinux
 build/
 tmp/

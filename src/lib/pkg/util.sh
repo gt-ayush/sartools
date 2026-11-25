@@ -15,7 +15,7 @@ else
     USER_HOME=$HOME
 fi
 
-USER_CONF_DIR="${XDG_CONFIG_HOME:-$USER_HOME/.config}/artools"
+USER_CONF_DIR="${XDG_CONFIG_HOME:-$USER_HOME/.config}/sartools"
 
 prepare_dir "${USER_CONF_DIR}"
 
@@ -28,9 +28,9 @@ load_pkg_config(){
     # shellcheck source=config/conf/artools-pkg.conf
     [[ -r "$conf" ]] && source "$conf"
 
-    CHROOTS_DIR=${CHROOTS_DIR:-'/var/lib/artools'}
+    CHROOTS_DIR=${CHROOTS_DIR:-'/var/lib/sartools'}
 
-    WORKSPACE_DIR=${WORKSPACE_DIR:-"${USER_HOME}/artools-workspace"}
+    WORKSPACE_DIR=${WORKSPACE_DIR:-"${USER_HOME}/sartools-workspace"}
 
     ARCH=${ARCH:-"$(uname -m)"}
 

@@ -16,7 +16,7 @@ prepare_initramfs_mkinitcpio() {
         export ARTIX_GNUPG_FD
     fi
 
-    artix-chroot "$mnt" mkinitcpio -k "$k" \
+    sarchy-chroot "$mnt" mkinitcpio -k "$k" \
         -c /etc/"$mkinitcpio_conf" \
         -g /boot/initramfs.img
 

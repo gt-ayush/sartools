@@ -5,7 +5,7 @@ BUILDTOOLVER ?= $(V)
 
 CHROOTVER=0.12
 
-TOOLS = artools
+TOOLS = sartools
 SYSCONFDIR = /etc
 PREFIX = /usr/local
 LIBDIR = $(PREFIX)/share/$(TOOLS)/lib
@@ -75,17 +75,17 @@ $(eval $(call buildInScript,build/lib,src/lib/,,644))
 $(foreach completion,$(wildcard contrib/completion/*),$(eval $(call buildInScript,build/$(completion),$(completion)/,.in,444)))
 
 conf_base:
-	@install -d $(BUILDDIR)/pacman.conf.d $(BUILDDIR)/artools
+	@install -d $(BUILDDIR)/pacman.conf.d $(BUILDDIR)/$(TOOLS)
 	@cp -a $(PACMAN_CONFIGS) $(BUILDDIR)/pacman.conf.d
 
 conf_pkg:
-	@install -d $(BUILDDIR)/makepkg.conf.d $(BUILDDIR)/artools
+	@install -d $(BUILDDIR)/makepkg.conf.d $(BUILDDIR)/$(TOOLS)
 	@cp -ra $(MAKEPKG_CONFIGS) $(BUILDDIR)/makepkg.conf.d
-	@cp -a $(TOOLS_CONFIGS_PKG) $(BUILDDIR)/artools
+	@cp -a $(TOOLS_CONFIGS_PKG) $(BUILDDIR)/$(TOOLS)
 
 conf_iso:
-	@install -d $(BUILDDIR)/artools
-	@cp -a $(TOOLS_CONFIGS_ISO) $(BUILDDIR)/artools
+	@install -d $(BUILDDIR)/$(TOOLS)
+	@cp -a $(TOOLS_CONFIGS_ISO) $(BUILDDIR)/$(TOOLS)
 
 clean:
 	rm -rf $(BUILDDIR)

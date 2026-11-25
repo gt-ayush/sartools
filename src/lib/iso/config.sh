@@ -36,9 +36,9 @@ configure_chroot(){
     configure_user "$fs"
     configure_services "$fs"
     configure_calamares "$fs"
-    [[ ! -d "$fs/etc/artools" ]] && mkdir -p "$fs/etc/artools"
+    [[ ! -d "$fs/etc/sartools" ]] && mkdir -p "$fs/etc/sartools"
     msg2 "Writing: live.conf"
-    write_live_session_conf > "$fs/etc/artools/live.conf"
+    write_live_session_conf > "$fs/etc/sartools/live.conf"
     msg "Done configuring [%s]" "${fs##*/}"
 }
 

@@ -4,7 +4,7 @@
 
 LIBDIR=${LIBDIR:-'@libdir@'}
 DATADIR=${DATADIR:-'@datadir@'}
-SYSCONFDIR=${SYSCONFDIR:-'@sysconfdir@/artools'}
+SYSCONFDIR=${SYSCONFDIR:-'@sysconfdir@/sartools'}
 
 # shellcheck source=src/lib/iso/util.sh
 source "${LIBDIR}"/iso/util.sh
@@ -191,7 +191,7 @@ make_grub(){
 }
 
 gen_iso_fn(){
-    local vars=("artix") name
+    local vars=("sarchy") name
     vars+=("${profile}")
     vars+=("${INITSYS}")
     case "${STABILITY}" in
@@ -225,7 +225,7 @@ prepare_build(){
 
     iso_file=$(gen_iso_fn).iso
 
-    iso_label="ARTIX_$(date +%Y%m)"
+    iso_label="SARCHY_$(date +%Y%m)"
 
     basestrap_args+=(-C "${pacman_conf}")
     work_dir=${chroots_iso}/${profile}/artix
@@ -265,7 +265,7 @@ mk_squash(){
 }
 
 mk_iso(){
-    touch "${iso_root}/.artix"
+    touch "${iso_root}/.sarchy"
     msg "Making bootable image"
     # Sanity checks
     [[ ! -d "${iso_root}" ]] && return 1

@@ -38,7 +38,7 @@ prepare_grub(){
 
     prepare_dir "${grub}"/themes
 
-    cp -r "${theme}"/themes/artix "${grub}"/themes
+    cp -r "${theme}"/themes/sarchy "${grub}"/themes
     cp -r "${livecfg}"/{locales,tz} "${grub}"
 
     if [[ -f /usr/share/grub/unicode.pf2 ]];then
@@ -52,7 +52,7 @@ prepare_grub(){
     local size=4M mnt="${mnt_dir}/efiboot" efi_img="${iso_root}/boot/efi.img"
     msg2 "Creating fat image of %s ..." "${size}"
     truncate -s "${size}" "${efi_img}"
-    mkfs.fat -n ARTIX_EFI "${efi_img}" &>/dev/null
+    mkfs.fat -n SARCHY_EFI "${efi_img}" &>/dev/null
     prepare_dir "${mnt}"
     mount_img "${efi_img}" "${mnt}"
     prepare_dir "${mnt}"/efi/boot

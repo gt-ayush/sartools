@@ -16,7 +16,7 @@ source "${LIBDIR}"/base/unshare-mount.sh
 source "${LIBDIR}"/base/chroot.sh
 
 
-artix-chroot() {
+sarchy-chroot() {
     check_root "" "${BASH_SOURCE[0]}" "${orig_args[@]}"
 #     (( EUID == 0 )) || die 'This script must be run with root privileges'
 
@@ -48,7 +48,7 @@ usage: ${0##*/} chroot-dir [command] [arguments...]
 
 If 'command' is unspecified, ${0##*/} will launch /bin/bash.
 
-Note that when using artix-chroot, the target chroot directory *should* be a
+Note that when using sarchy-chroot, the target chroot directory *should* be a
 mountpoint. This ensures that tools such as pacman(8) or findmnt(8) have an
 accurate hierarchy of the mounted filesystems within the chroot.
 
@@ -81,8 +81,8 @@ shift
 args=("$@")
 if (( unshare )); then
     setup=unshare_setup
-    "$mount_unshare" bash -c "$(declare_all); artix-chroot"
+    "$mount_unshare" bash -c "$(declare_all); sarchy-chroot"
 else
     setup=chroot_setup
-    artix-chroot
+    sarchy-chroot
 fi
