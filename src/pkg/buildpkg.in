@@ -1,0 +1,162 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+DATADIR=${DATADIR:-'@datadir@'}
+SYSCONFDIR=${SYSCONFDIR:-'@sysconfdir@/artools'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/base/chroot.sh
+source "${LIBDIR}"/base/chroot.sh
+# shellcheck source=src/lib/pkg/util.sh
+source "${LIBDIR}"/pkg/util.sh
+
+create_first=false
+rebuild=false
+
+mkchrootpkg_args=(-c)
+
+base_packages=('base-devel')
+chroots_pkg="${CHROOTS_DIR}/buildpkg"
+
+arch=${ARCH}
+repo=${REPO}
+
+usage() {
+    printf 'Usage: %s [options] -- [mkchrootpkg_args]\n' "${0##*/}"
+    printf '    -r <dir>           Create chroots in this directory\n'
+    printf '                       [default: %s]\n' "${chroots_pkg}"
+    printf '    -d <dest>          Destination repo chroot\n'
+    printf '                       [default: %s]\n' "${repo}"
+    printf '    -a <arch>          Build arch chroot\n'
+    printf '                       [default: %s]\n' "${arch}"
+    printf '    -e <name>          Export PACKAGER\n'
+    printf "                       format: 'John Doe <john@doe.com>'\n"
+    printf '    -c                 Recreate the chroot before building\n'
+    printf '    -m                 Major rebuild\n'
+    printf '    -I <pkg>           Install a package file into the working copy\n'
+    printf '                       of the chroot before building. Can be passed\n'
+    printf '                       multiple times.\n'
+    printf '    -N                 Disable check() function\n'
+    printf '    -C                 Run checkpkg after build\n'
+    printf '    -n                 Run namcap after build\n'
+    printf '    -h                 This help\n'
+    printf '\n'
+    printf 'Default mkchrootpkg_args args: %s\n' "${mkchrootpkg_args[*]}"
+    printf '\n'
+    exit "$1"
+}
+
+opts='hcCNmnr:d:a:e:I:'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        r) chroots_pkg="$OPTARG" ;;
+        d) repo="$OPTARG" ;;
+        a) arch="$OPTARG" ;;
+        e) packager="$OPTARG" ;;
+        c) create_first=true ;;
+        m) rebuild=true ;;
+        C) mkchrootpkg_args+=(-C) ;;
+        N) mkchrootpkg_args+=(-N) ;;
+        n) mkchrootpkg_args+=(-n) ;;
+        I) mkchrootpkg_args+=(-I "$OPTARG") ;;
+        h|?) usage 0 ;;
+    esac
+done
+
+if "${rebuild}"; then
+    repo=${repo%-*}
+fi
+
+if [[ "${repo}" == lib32* ]]; then
+    base_packages+=('multilib-devel')
+fi
+
+pacman_conf="${DATADIR}/pacman.conf.d/${repo}-${arch}.conf"
+if [[ -f ${USER_CONF_DIR}/pacman.conf.d/${repo}-${arch}.conf ]]; then
+    pacman_conf="${USER_CONF_DIR}/pacman.conf.d/${repo}-${arch}.conf"
+fi
+
+makepkg_conf="${DATADIR}/makepkg.conf.d/${arch}.conf"
+if [[ -f ${USER_CONF_DIR}/makepkg.conf.d/${arch}.conf ]]; then
+    makepkg_conf="${USER_CONF_DIR}/makepkg.conf.d/${arch}.conf"
+fi
+if [[ -f ${DATADIR}/makepkg.conf.d/${repo}-${arch}.conf ]]; then
+    makepkg_conf="${DATADIR}/makepkg.conf.d/${repo}-${arch}.conf"
+    if [[ -f ${USER_CONF_DIR}/makepkg.conf.d/${repo}-${arch}.conf ]]; then
+        makepkg_conf="${USER_CONF_DIR}/makepkg.conf.d/${repo}-${arch}.conf"
+    fi
+fi
+
+if [[ -f "${DATADIR}/setarch-aliases.d/${arch}" ]]; then
+    read -r set_arch < "${DATADIR}/setarch-aliases.d/${arch}"
+else
+    set_arch="${arch}"
+fi
+
+if [[ -n "${packager}" ]]; then
+    export PACKAGER=${packager}
+fi
+
+# Architecture-specific Mount
+arch_mounts=()
+if [[ -f "${DATADIR}/mount.d/${arch}" ]]; then
+    mapfile -t arch_mounts < "${DATADIR}/mount.d/${arch}"
+fi
+for arch_mount in "${arch_mounts[@]}"; do
+    if [[ $arch_mount = rw* ]]; then
+        arch_mount=${arch_mount#rw }
+        in_array "$arch_mount" "${mkchrootpkg_args[@]}" || mkchrootpkg_args+=(-b "-B:$arch_mount")
+    elif [[ $arch_mount = ro* ]]; then
+        arch_mount=${arch_mount#ro }
+        in_array "$arch_mount" "${mkchrootpkg_args[@]}" || mkchrootpkg_args+=(-b "-Br:$arch_mount")
+    fi
+done
+
+check_root SOURCE_DATE_EPOCH,SRCDEST,SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER,GNUPGHOME "${BASH_SOURCE[0]}" "$@"
+
+manage-pkgbuild-keys --import
+
+mkchrootpkg_args+=("${@:$OPTIND}")
+
+if ${create_first} || [[ ! -d "${chroots_pkg}/${repo}-${arch}" ]];then
+    msg "Creating chroot for [%s] (%s)..." "${repo}" "${arch}"
+
+    for copy in "${chroots_pkg}/${repo}-${arch}"/*; do
+        [[ -d $copy ]] || continue
+        msg2 "Deleting chroot copy '%s'..." "$(basename "${copy}")"
+
+        lock 9 "$copy.lock" "Locking chroot copy '%s'" "$copy"
+
+        subvolume_delete_recursive "${copy}"
+        rm -rf --one-file-system "${copy}"
+    done
+    lock_close 9
+
+    rm -rf --one-file-system "${chroots_pkg}/${repo}-${arch}"
+    (umask 0022; mkdir -p "${chroots_pkg}/${repo}-${arch}")
+    setarch "${set_arch}" mkchroot \
+        -C "${pacman_conf}" \
+        -M "${makepkg_conf}" \
+        "${chroots_pkg}/${repo}-${arch}/root" \
+        "${base_packages[@]}" || abort
+else
+    lock 9 "${chroots_pkg}/${repo}-${arch}/root.lock" "Locking clean chroot"
+    chroot-run \
+        -C "${pacman_conf}" \
+        -M "${makepkg_conf}" \
+        "${chroots_pkg}/${repo}-${arch}/root" \
+        pacman -Syuu --noconfirm || abort
+fi
+
+# Always build official packages reproducibly
+if [[ ! -v SOURCE_DATE_EPOCH ]]; then
+    SOURCE_DATE_EPOCH=$(date +%s)
+    export SOURCE_DATE_EPOCH
+fi
+
+msg "Building in chroot for [%s] (%s)..." "${repo}" "${arch}"
+exec mkchrootpkg -r "${chroots_pkg}/${repo}-${arch}" "${mkchrootpkg_args[@]}"

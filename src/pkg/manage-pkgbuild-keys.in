@@ -1,0 +1,99 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+
+
+usage() {
+    cat <<- _EOF_
+        Usage: ${BASH_SOURCE[0]##*/}
+
+        Export or import the PGP keys from a PKGBUILDs validpgpkeys array into/from the keys/pgp/
+        subdirectory. Useful for distributing packager validated source signing
+        keys alongside PKGBUILDs.
+
+        OPTIONS
+            -i, --import    Import keys
+            -e, --export    Export keys
+            -h, --help      Show this help text
+_EOF_
+}
+
+action=''
+error=0
+
+# option checking
+while (( $# )); do
+    case $1 in
+        -i|--import) action="import"; shift ;;
+        -e|--export) action="export"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "invalid argument: %s" "$1" ;;
+    esac
+done
+
+if [[ ! -f PKGBUILD ]]; then
+    die "This must be run a directory containing a PKGBUILD."
+fi
+
+mapfile -t validpgpkeys < <(
+    # shellcheck source=contrib/makepkg/PKGBUILD.proto
+    . ./PKGBUILD
+    if (( ${#validpgpkeys[@]} )); then
+        printf "%s\n" "${validpgpkeys[@]}"
+    fi
+)
+
+if [[ "$action" == 'export' ]]; then
+    msg "Exporting ${#validpgpkeys[@]} PGP keys..."
+    if (( ${#validpgpkeys[@]} == 0 )); then
+        exit 0
+    fi
+
+    trap 'rm -rf $TEMPDIR' EXIT INT TERM QUIT
+    TEMPDIR=$(mktemp -d --tmpdir export-pkgbuild-keys.XXXXXXXXXX)
+
+    mkdir -p keys/pgp
+
+    for key in "${validpgpkeys[@]}"; do
+        gpg --output "$TEMPDIR/$key.asc" --armor --export --export-options export-minimal "$key" 2>/dev/null
+
+        # gpg does not give a non-zero return value if it fails to export...
+        if [[ -f $TEMPDIR/$key.asc ]]; then
+            msg2 "Exported $key"
+            mv "$TEMPDIR/$key.asc" "keys/pgp/$key.asc"
+        else
+            if [[ -f keys/pgp/$key.asc ]]; then
+                warning "Failed to update key: $key"
+            else
+                error "Key unavailable: $key"
+                error=1
+            fi
+        fi
+    done
+elif [[ "$action" == 'import' ]]; then
+
+    msg "Ensuring required PGP keys are present..."
+    for key in "${validpgpkeys[@]}"; do
+
+        msg2 "Checking for $key..."
+        if ! gpg --recv-keys "$key" || ! gpg --fingerprint "$key"; then
+            if [[ -f keys/pgp/$key.asc ]]; then
+                msg2 "Importing key from local..."
+                gpg --import "keys/pgp/$key.asc"
+            else
+                error "Key unavailable: $key"
+                error=1
+            fi
+        fi
+
+    done
+fi
+
+if (( error )); then
+    die "Failed to $action all \'validpgpkeys\' entries."
+fi

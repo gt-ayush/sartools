@@ -1,0 +1,16 @@
+*~
+*.tar.gz
+*.tar.xz
+.kateproject.d
+data/schemas/*.conf
+.project
+iso-profiles
+live-services
+artixpkg_cmds
+PKGBUILD
+
+contrib/artixlinux
+build/
+tmp/
+checks/
+check.sh

@@ -1,0 +1,55 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/base/chroot.sh
+source "${LIBDIR}"/base/chroot.sh
+# shellcheck source=src/lib/pkg/util/deploy.sh
+source "${LIBDIR}"/pkg/util/deploy.sh
+
+# shellcheck source=config/makepkg/x86_64.conf
+load_makepkg_config
+
+export PKGDEST
+export GPG_KEY
+export GPG_PASS
+
+passfiles=("$@")
+
+sign_pkg(){
+    local file_to_sign="$1"
+
+    if [ ! -e "$file_to_sign" ]; then
+        error "%s does not exist!" "$file_to_sign"
+        exit 1
+    fi
+
+    if [[ -n "${GPG_KEY}" ]] && [[ -n "${GPG_PASS}" ]]; then
+        msg "Signing [%s]" "${file_to_sign##*/}"
+        gpg --homedir /etc/pacman.d/gnupg --no-permission-warning \
+            --no-default-keyring --default-key "${GPG_KEY}" --passphrase "${GPG_PASS}" \
+            -q --detach-sign "$file_to_sign"
+    fi
+}
+
+check_root PKGDEST,GPG_KEY,GPG_PASS "${BASH_SOURCE[0]}" "$@"
+
+for pkg in "${passfiles[@]}"; do
+    msg "Searching %s ..." "$pkg"
+    if pkgfile=$(find_cached_pkgfile "$pkg");then
+        msg2 "Found: %s" "${pkgfile}"
+        [[ -e "${pkgfile}".sig ]] && rm "${pkgfile}".sig
+        if ! sign_pkg "${pkgfile}"; then
+            die "Failed to sign package!"
+        fi
+        ret=0
+    else
+        ret=1
+    fi
+done
+
+exit "$ret"

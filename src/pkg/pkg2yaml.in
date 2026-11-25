@@ -1,0 +1,207 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+
+# shellcheck disable=1091
+source "${MAKEPKG_LIBRARY}"/util/pkgbuild.sh
+# shellcheck disable=1091
+source "${MAKEPKG_LIBRARY}"/util/schema.sh
+
+# {{{ functions
+
+yaml_array_str() {
+    local array
+
+    for entry in "$@"; do
+        array="${array:-}${array:+,} '${entry}'"
+    done
+    printf "%s\n" "[${array}]"
+}
+
+pkgbuild_extract_to_srcyaml() {
+    # $1: pkgname
+    # $2: index
+    # $3: attr name
+    # $4: multivalued
+
+    local pkgname="$1" i="$2" attrname="$3" isarray="$4"  outvalue=
+
+    if get_pkgbuild_attribute "$pkgname" "$attrname" "$isarray" 'outvalue'; then
+        local ov an
+
+        if [[ -n $pkgname ]]; then
+            an=".pkgname[$i].$attrname"
+        else
+            an=".pkgbase.$attrname"
+        fi
+
+        if (( isarray )); then
+            ov=$(yaml_array_str "${outvalue[@]}")
+        else
+            ov="${outvalue[*]}"
+            if [[ -z "$ov" ]]; then
+                ov="null"
+            fi
+        fi
+
+        an="$an" ov="$ov" \
+        yq -P 'eval(strenv(an)) = env(ov)' -i "${YAML}"
+    fi
+}
+
+srcyaml_write_node_details() {
+    local attr package_arch a
+    local multivalued_arch_attrs=(
+        source
+        provides
+        conflicts
+        depends
+        replaces
+        optdepends
+        makedepends
+        checkdepends
+        "${known_hash_algos[@]/%/sums}"
+    )
+
+    for attr in "${singlevalued[@]}"; do
+        pkgbuild_extract_to_srcyaml "$1" "$2" "$attr" 0
+    done
+
+    for attr in "${multivalued[@]}"; do
+        pkgbuild_extract_to_srcyaml "$1" "$2" "$attr" 1
+    done
+
+    get_pkgbuild_attribute "$pn" 'arch' 1 'package_arch'
+    for a in "${package_arch[@]}"; do
+        # 'any' is special. there's no support for, e.g. depends_any.
+        [[ $a = any ]] && continue
+
+        for attr in "${multivalued_arch_attrs[@]}"; do
+            pkgbuild_extract_to_srcyaml "$1" "$2" "${attr}_$a" 1
+        done
+    done
+}
+
+srcyaml_write_global() {
+    local singlevalued=(
+        pkgdesc
+        pkgver
+        pkgrel
+        epoch
+        url
+        install
+        changelog
+    )
+    local multivalued=(
+        arch
+        groups
+        license
+        checkdepends
+        makedepends
+        depends
+        optdepends
+        provides
+        conflicts
+        replaces
+        noextract
+        options
+        backup
+        source
+        validpgpkeys
+        "${known_hash_algos[@]/%/sums}"
+    )
+
+    srcyaml_write_node_details '' ''
+}
+
+srcyaml_write_package() {
+    local singlevalued=(
+        pkgdesc
+        url
+        install
+        changelog
+    )
+    local multivalued=(
+        arch
+        groups
+        license
+        checkdepends
+        depends
+        optdepends
+        provides
+        conflicts
+        replaces
+        options
+        backup
+    )
+
+    srcyaml_write_node_details "$1" "$2"
+}
+
+write_srcyaml() {
+    yq -n '"---"' > "${YAML}"
+
+    local ver
+    ver=$(get_full_version) \
+    yq -P '.version = strenv(ver)' -i "${YAML}"
+
+    # https://github.com/mikefarah/yq/issues/1836
+    # yq '. head_comment="generated with artixpkg @buildtoolver@"' -i "${YAML}"
+
+    local name=${pkgbase:-$pkgname}
+    name="$name" \
+    yq -P '.pkgbase.name = env(name)' -i "${YAML}"
+    srcyaml_write_global
+
+    local pn
+    local key
+    for ((i = 0 ; i < "${#pkgname[@]}" ; i++)); do
+        pn="${pkgname[$i]}" key=".pkgname[$i]" \
+        yq -P 'eval(strenv(key)).name = env(pn)' -i "${YAML}"
+        srcyaml_write_package "${pkgname[$i]}" "$i"
+    done
+
+    yq '. foot_comment="generated with artixpkg @buildtoolver@"' -i "${YAML}"
+}
+
+# }}}
+
+usage() {
+    printf 'Usage: %s [options]\n' "${0##*/}"
+    printf "    -o <out>      Out file (default: ${YAML})\n"
+    printf '    -h            This help\n'
+    printf '\n'
+    exit "$1"
+}
+
+YAML=/tmp/srcinfo.yaml
+
+# shellcheck source=config/makepkg/x86_64.conf
+load_makepkg_config
+
+opts='o:h'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        o) YAML="$OPTARG" ;;
+        h|?) usage 0 ;;
+    esac
+done
+
+shift $(( OPTIND - 1 ))
+
+# srcpath=$(readlink -f "$1")
+
+[[ -z "$srcpath" ]] && srcpath="."
+
+[[ -f "$srcpath"/PKGBUILD ]] || die "%s/PKGBUILD does not exist!" "$srcpath"
+
+# shellcheck source=contrib/makepkg/PKGBUILD.proto
+source "$srcpath"/PKGBUILD
+
+write_srcyaml

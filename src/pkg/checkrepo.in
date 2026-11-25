@@ -1,0 +1,137 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+DATADIR=${DATADIR:-'@datadir@'}
+SYSCONFDIR=${SYSCONFDIR:-'@sysconfdir@/artools'}
+
+# shellcheck source=src/lib/pkg/util.sh
+source "${LIBDIR}"/pkg/util.sh
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/pkg/db/db.sh
+source "${LIBDIR}"/pkg/db/db.sh
+
+shopt -s extglob
+
+#{{{ table
+
+msg_table_header(){
+    local mesg=$1; shift
+    # shellcheck disable=2059
+    printf "${BLUE} ${mesg} ${ALL_OFF}\n" "$@"
+}
+
+msg_row_yellow(){
+    local mesg=$1; shift
+    # shellcheck disable=2059
+    printf "${YELLOW} ${mesg}${ALL_OFF}\n" "$@"
+}
+
+msg_row_green(){
+    local mesg=$1; shift
+    # shellcheck disable=2059
+    printf "${GREEN} ${mesg}${ALL_OFF}\n" "$@"
+}
+
+msg_row(){
+    local mesg=$1; shift
+    # shellcheck disable=2059
+    printf "${WHITE} ${mesg}${ALL_OFF}\n" "$@"
+}
+
+msg_row_red(){
+    local mesg=$1; shift
+    # shellcheck disable=2059
+    printf "${RED} ${mesg} ${ALL_OFF}\n" "$@"
+}
+
+#}}}
+
+extract_db() {
+    local u="$1" cdir="$2"
+    rm -rf "$cdir"
+    mkdir -p "$cdir"
+    msg2 "%s" "${cdir##*/}"
+    curl -L -s "$u" | bsdtar -xf - -C "$cdir"
+}
+
+update_linksdb_cache(){
+    msg "Updating database cache ..."
+    local cachedir url
+    for repo in "${search[@]}"; do
+        cachedir=${db_cache_dir}/linksdb/$repo
+        # shellcheck disable=SC2153
+        url=${REPOS_MIRROR}/$repo/os/${CARCH}/$repo.${linksdb_ext}
+        extract_db "$url" "$cachedir"
+    done
+    msg "Done"
+}
+
+#}}}
+
+#{{{ sogrep
+
+query_db() {
+    if ${sync}; then
+        update_linksdb_cache
+    fi
+    msg_table_header "${tableQ}" "Repo" "Package" "Library"
+    for repo in "${search[@]}"; do
+        local db
+        db=${db_cache_dir}/linksdb/$repo/
+        if [[ -d ${db} ]]; then
+            while read -rd '' pkg; do
+                read -r match
+                pkg=${pkg#"${db}"}
+                pkg="${pkg%/*}"
+                msg_row "${tableQ}" "$repo" "$pkg" "${match}"
+            done < <(grep -rZ "$library" "$db") | sort -u
+        fi
+    done
+}
+
+#}}}
+
+db_cache_dir="${XDG_CACHE_HOME:-$USER_HOME/.cache}/artools"
+
+linksdb_ext="links.tar.${DBEXT}"
+
+load_makepkg_config
+
+sync=false
+query=false
+search=("${ARTIX_DB[@]}")
+
+readonly tableQ="%-20s %-55s %s"
+
+usage() {
+    printf "Usage: %s [options] [query library]\n" "${0##*/}"
+    printf "    -r <repo>     Repo to query\n"
+    printf "    -s            Sync repo databases\n"
+    printf "    -q            Query repo databases for so libs\n"
+    printf '    -h            This help\n'
+    printf '\n'
+    printf '\n'
+    exit "$1"
+}
+
+opts='r:sqh'
+
+while getopts "${opts}" arg; do
+    case "${arg}" in
+        r) search=("$OPTARG") ;;
+        s) sync=true ;;
+        q) query=true ;;
+        h|?) usage 0 ;;
+    esac
+done
+
+shift $(( OPTIND - 1 ))
+
+library="$1"; shift
+
+if ${query}; then
+    query_db
+fi

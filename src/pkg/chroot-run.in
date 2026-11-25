@@ -1,0 +1,192 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+DATADIR=${DATADIR:-'@datadir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/base/mount.sh
+source "${LIBDIR}"/base/mount.sh
+# shellcheck source=src/lib/base/chroot.sh
+source "${LIBDIR}"/base/chroot.sh
+
+CHROOTVERSION=@chrootver@
+
+# $1: chroot
+kill_chroot_process(){
+    local prefix="$1" flink pid name
+    for root_dir in /proc/*/root; do
+        flink=$(readlink "$root_dir")
+        if [[ -n "$flink" ]]; then
+            if [[ "${flink:0:${#prefix}}" == "$prefix" ]]; then
+                # this process is in the chroot...
+                pid=$(basename "$(dirname "$root_dir")")
+                name=$(ps -p "$pid" -o comm=)
+                msg2 "Killing chroot process: %s (%s)" "$name" "$pid"
+                kill -9 "$pid"
+            fi
+        fi
+    done
+    sleep 1
+}
+
+# umask might have been changed in /etc/profile
+# ensure that sane default is set again
+umask 0022
+
+working_dir=''
+
+files=()
+mount_args="-B:/etc/hosts:/etc/hosts"
+
+usage() {
+    printf "Usage: %s [options] working-dir [run arguments]\n" "${0##*/}"
+    printf "A wrapper around chroot. Provides support for pacman.\n"
+    printf '\n'
+    printf ' options:\n'
+    printf '    -C <file>     Location of a pacman config file\n'
+    printf '    -M <file>     Location of a makepkg config file\n'
+    printf '    -c <dir>      Set pacman cache\n'
+    printf '    -f <file>     Copy file from the host to the chroot\n'
+    printf '    -s            Do not run setarch\n'
+    printf '    -t <opts>     tmpfs mount opts\n'
+    printf '    -b <args>     Bind mountargs\n'
+    printf '                  Format:\n'
+    printf '                  "arg1:src1:dest1 arg2:src2:dest2"\n'
+    printf '    -h            This message\n'
+    exit 1
+}
+
+# save all args for check_root
+orig_args=("$@")
+
+opts='hC:M:c:b:f:t:s'
+
+while getopts ${opts} arg; do
+    case "${arg}" in
+        C) pacman_conf="$OPTARG" ;;
+        M) makepkg_conf="$OPTARG" ;;
+        c) cache_dirs+=("$OPTARG") ;;
+        f) files+=("$OPTARG") ;;
+        s) nosetarch=1 ;;
+        t) tmpfs_opts="$OPTARG" ;;
+        b) bindmounts="$OPTARG"; mount_args+=" ${bindmounts}" ;;
+        h|?) usage ;;
+        *) error "invalid argument '%s'" "$arg"; usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+(( $# < 1 )) && die 'You must specify a directory.'
+check_root "" "${BASH_SOURCE[0]}" "${orig_args[@]}"
+
+working_dir=$(readlink -f "$1")
+shift 1
+
+[[ -z $working_dir ]] && die 'Please specify a working directory.'
+
+if (( ${#cache_dirs[@]} == 0 )); then
+    mapfile -t cache_dirs < <(pacman-conf --config "${pacman_conf:-$working_dir/etc/pacman.conf}" CacheDir)
+fi
+
+# shellcheck disable=2016
+mapfile -t host_mirrors < <(pacman-conf --repo world Server 2> /dev/null | sed -r 's#(.*/)world/os/.*#\1$repo/os/$arch#')
+
+for host_mirror in "${host_mirrors[@]}"; do
+    if [[ $host_mirror == *file://* ]]; then
+        # shellcheck disable=SC2016
+        host_mirror=$(echo "$host_mirror" | sed -r 's#file://(/.*)/\$repo/os/\$arch#\1#g')
+        for m in "$host_mirror"/pool/*/; do
+            in_array "$m" "${cache_dirs[@]}" || cache_dirs+=("$m")
+        done
+    fi
+done
+
+while read -r line; do
+    mapfile -t lines < <(pacman-conf --config "${pacman_conf:-$working_dir/etc/pacman.conf}" \
+        --repo "$line" Server | sed -r 's#(.*/)[^/]+/os/.+#\1#')
+    for line in "${lines[@]}"; do
+        if [[ $line = file://* ]]; then
+            line=${line#file://}
+            in_array "$line" "${cache_dirs[@]}" || cache_dirs+=("$line")
+        fi
+    done
+done < <(pacman-conf --config "${pacman_conf:-$working_dir/etc/pacman.conf}" --repo-list)
+
+mount_args+=" -B:${cache_dirs[0]//:/\\:}:${cache_dirs[0]//:/\\:}"
+
+for cache_dir in "${cache_dirs[@]:1}"; do
+    mount_args+=" -Br:${cache_dir//:/\\:}:${cache_dir//:/\\:}"
+done
+
+# {{{ functions
+
+copy_hostconf () {
+    unshare --fork --pid gpg --homedir "$working_dir"/etc/pacman.d/gnupg/ --no-permission-warning --quiet --batch --import --import-options import-local-sigs "$(pacman-conf GpgDir)"/pubring.gpg >/dev/null 2>&1
+    pacman-key --gpgdir "$working_dir"/etc/pacman.d/gnupg/ --import-trustdb "$(pacman-conf GpgDir)" >/dev/null 2>&1
+
+    printf 'Server = %s\n' "${host_mirrors[@]}" >"$working_dir/etc/pacman.d/mirrorlist"
+
+    [[ -n $pacman_conf ]] && cp "$pacman_conf" "$working_dir/etc/pacman.conf"
+
+    [[ -n $makepkg_conf ]] && cp "$makepkg_conf" "$working_dir/etc/makepkg.conf"
+
+    local file
+    for file in "${files[@]}"; do
+        mkdir -p "$(dirname "$working_dir$file")"
+        cp -T "$file" "$working_dir$file"
+    done
+
+    sed -r "s|^#?\\s*CacheDir.+|CacheDir = ${cache_dirs[*]}|g" -i "$working_dir/etc/pacman.conf"
+}
+
+chroot_extra_mount() {
+    chroot_add_resolv_conf "${working_dir}"
+
+    for arg in ${mount_args}; do
+        local flag dest src
+        flag=${arg%%:*}
+        dest=${arg##*:}
+        src=${arg%:*}
+        src=${src#*:}
+        chroot_add_mount "${src}" "${working_dir}${dest}" "${flag}"
+    done
+}
+
+# }}}
+
+umask 0022
+
+# Sanity check
+if [[ ! -f "$working_dir/.artix-chroot" ]]; then
+    die "'%s' does not appear to be an Artix chroot." "$working_dir"
+elif [[ $(cat "$working_dir/.artix-chroot") != "${CHROOTVERSION}" ]]; then
+    die "chroot '%s' is not at version %s. Please rebuild." "$working_dir" "${CHROOTVERSION}"
+fi
+
+chroot_setup "${working_dir}" "${tmpfs_opts}" || die "failed to setup API filesystems in chroot %s" "${working_dir}"
+
+chroot_extra_mount
+
+copy_hostconf
+
+eval "$(grep -a '^CARCH=' "$working_dir/etc/makepkg.conf")"
+
+[[ -z $nosetarch ]] || unset CARCH
+if [[ -f "${DATADIR}/setarch-aliases.d/${CARCH}" ]]; then
+    read -r set_arch < "${DATADIR}/setarch-aliases.d/${CARCH}"
+else
+    set_arch="${CARCH}"
+fi
+
+chroot_args=(/usr/bin/env PATH=/usr/local/sbin:/usr/local/bin:/usr/bin)
+
+${CARCH:+setarch "${set_arch}"} chroot "${working_dir}" "${chroot_args[@]}" "$@"
+
+ret=$?
+
+kill_chroot_process "${working_dir}"
+
+exit $ret

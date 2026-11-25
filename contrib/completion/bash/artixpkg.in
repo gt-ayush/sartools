@@ -1,0 +1,309 @@
+#/usr/bin/env bash
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+_artixpkg_pkgbase() {
+    source "${LIBDIR}"/pkg/util.sh
+    ls -1 "${TREE_DIR_ARTIX}" | tr '\n' ' '
+}
+
+_artixpkg_remotepkgbase() {
+    curl -s "https://checkupdates.artixlinux.org/api/1.0/packages?startswith=$1"
+}
+
+_artixpkg_maintainers() {
+    curl -s "https://checkupdates.artixlinux.org/api/1.0/maintainers"
+}
+
+_artixpkg_completion() {
+    local cur prev comps comps_all repos autorepos teams agents cwords comp_cword_exflag agent_flag_present
+    source "${LIBDIR}"/pkg/db/db.sh 2>/dev/null
+
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    for ((i = COMP_CWORD - 1; i >= 0; i--)); do
+        if [[ ${COMP_WORDS[i]} != -* ]]; then
+            last_non_flag_word="${COMP_WORDS[i]}"
+            break
+        fi
+    done
+
+    comps=""
+    comps_all=""
+    comp_cword_exflag=0
+    comp_cword_all=0
+    agent_flag_present=false
+    for ((i = 0; i < ${#COMP_WORDS[@]} - 1; i++)); do
+        word="${COMP_WORDS[i]}"
+        comps_all+=" $word"
+        ((comp_cword_all++))
+        if [[ $word != -* ]]; then
+            comps+=" $word"
+            ((comp_cword_exflag++))
+        fi
+        if [[ $word == -a || $word == --agent ]]; then
+            # -a can also refer to --adopt
+            agent_flag_present=true
+        fi
+    done
+    comps="${comps:1}"
+    comps_all="${comps_all:1}"
+
+    repos=""
+    for word in "${ARTIX_DB[@]}"; do
+        if [[ $word != -* ]]; then
+            repos+=" $word"
+        fi
+    done
+    repos="${repos:1}"
+    autorepos=""
+    for word in "${ARTIX_DB_MAP[@]}"; do
+        if [[ $word != -* ]]; then
+            autorepos+=" $word"
+        fi
+    done
+    autorepos="${autorepos:1}"
+    teams=""
+    for word in "${ARTIX_TEAMS[@]}"; do
+        if [[ $word != -* ]]; then
+            teams+=" $word"
+        fi
+    done
+    teams="${teams:1}"
+    agents=""
+    for word in "${AGENTS[@]}"; do
+        if [[ $word != -* ]]; then
+            agents+=" $word"
+        fi
+    done
+    agents="${agents:1}"
+
+    case "${comp_cword_exflag}" in
+        1)
+            COMPREPLY=($(compgen -W "admin git repo version -h --help" -- "${cur}"))
+            return 0
+            ;;
+        2)
+            case ${prev} in
+                admin)
+                    COMPREPLY=($(compgen -W "maintainer query team topic transfer -h --help" -- ${cur}))
+                    ;;
+                git)
+                    COMPREPLY=($(compgen -W "clone commit config create pull push -h --help" -- ${cur}))
+                    ;;
+                repo)
+                    COMPREPLY=($(compgen -W "add remove move import show -h --help" -- ${cur}))
+                    ;;
+                version)
+                    COMPREPLY=($(compgen -W "-h --help" -- ${cur}))
+                    ;;
+            esac
+            ;;  
+        *)
+            case "${comps}" in
+                "artixpkg repo import"*)
+                    case "${prev}" in
+                        "--tag")
+                            # this flag expects a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "--del -h --help --tag --nexttag -n --no-patch $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg repo show")
+                    COMPREPLY=($(compgen -W "-b --base -p --pkgs -h --help" -- ${cur}))
+                    ;;
+                "artixpkg repo"*)
+                    if [ "$agent_flag_present" = true ] ; then
+                        ((comp_cword_exflag--))
+                    fi
+                    case "${prev}" in
+                        "-a"|"--agent")
+                            COMPREPLY=($(compgen -W "$agents" -- ${cur}))
+                            ;;
+                        *)
+                            case "${comps}" in
+                                "artixpkg repo add"*)
+                                    local repoAddCommon="-p --push -r --rebuild -n --nocheck -a --agent -h --help"
+                                    case "${comp_cword_exflag}" in
+                                        3)
+                                            COMPREPLY=($(compgen -W "$repoAddCommon $autorepos $repos" -- ${cur}))
+                                            ;;
+                                        *)
+                                            COMPREPLY=($(compgen -W "$repoAddCommon $(_artixpkg_pkgbase)" -- ${cur}))
+                                            ;;
+                                    esac
+                                    ;;
+                                "artixpkg repo remove"*)
+                                    case "${comp_cword_exflag}" in
+                                        3)
+                                            COMPREPLY=($(compgen -W "-p --push -a --agent -h --help $autorepos $repos" -- ${cur}))
+                                            ;;
+                                        *)
+                                            COMPREPLY=($(compgen -W "-p --push -a --agent -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                                            ;;
+                                    esac
+                                    ;;
+                                "artixpkg repo move"*)
+                                    case "${comp_cword_exflag}" in
+                                        3|4)
+                                            COMPREPLY=($(compgen -W "-p --push -a --agent -h --help $autorepos $repos" -- ${cur}))
+                                            ;;
+                                        *)
+                                            COMPREPLY=($(compgen -W "-p --push -a --agent -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                                            ;;
+                                    esac
+                                    ;;
+                            esac
+                            ;;
+                    esac
+                    ;;
+                "artixpkg git clone"*)
+                    case "${prev}" in
+                        "--protocol")
+                            COMPREPLY=($(compgen -W "https" -- ${cur}))
+                            ;;
+                        "-t"|"--team")
+                            COMPREPLY=($(compgen -W "$teams" -- ${cur}))
+                            ;;
+                        "-m"|"--maintainer")
+                            COMPREPLY=($(compgen -W "$(_artixpkg_maintainers)" -- ${cur}))
+                            ;;
+                        "-s"|"--search"|"-j"|"--jobs")
+                            # these flags expect a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-m --maintainer --protocol -s --search -t --team -j --jobs --all -h --help $(_artixpkg_remotepkgbase ${cur})" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg git commit"*)
+                    case "${prev}" in
+                        "-t"|"--team")
+                            COMPREPLY=($(compgen -W "$teams" -- ${cur}))
+                            ;;
+                        "-m"|"--maintainer")
+                            COMPREPLY=($(compgen -W "$(_artixpkg_maintainers)" -- ${cur}))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-c --custom-message -m --maintainer -n --no-staging -p --preserve-pkgbase -t --topic -h --help" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg git config"*)
+                    case "${prev}" in
+                        "--protocol")
+                            COMPREPLY=($(compgen -W "https" -- ${cur}))
+                            ;;
+                        "-j"|"--jobs")
+                            # these flags expect a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "--protocol -j --jobs -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg git create"*)
+                    case "${prev}" in
+                        "-t"|"--team")
+                            COMPREPLY=($(compgen -W "$teams" -- ${cur}))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-c --clone -t --team -h --help" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg git pull"*)
+                    case "${prev}" in
+                        "-m"|"--maintainer")
+                            COMPREPLY=($(compgen -W "$(_artixpkg_maintainers)" -- ${cur}))
+                            ;;
+                        "-t"|"--topic"|"-j"|"--jobs")
+                            # these flags expect a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            case "${comps_all}" in
+                                *--all*)
+                                    COMPREPLY=($(compgen -W "-m --maintainer -t --topic -j --jobs -h --help" -- ${cur}))
+                                    ;;
+                                *)
+                                    COMPREPLY=($(compgen -W "-m --maintainer -t --topic -j --jobs --all -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                                    ;;
+                            esac
+                            ;;
+                    esac
+                    ;;
+                "artixpkg git push"*)
+                    case "${prev}" in
+                        "-m"|"--maintainer")
+                            COMPREPLY=($(compgen -W "$(_artixpkg_maintainers)" -- ${cur}))
+                            ;;
+                        "-t"|"--topic")
+                            # this flag expects a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-m --maintainer -t --topic -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg admin maintainer"*)
+                    case "${comp_cword_all}" in
+                        3)
+                            COMPREPLY=($(compgen -W "-a --adopt -o --orphan -h --help" -- ${cur}))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg admin query"*)
+                    case "${prev}" in
+                        "-m"|"--maintainer")
+                            COMPREPLY=($(compgen -W "$(_artixpkg_maintainers)" -- ${cur}))
+                            ;;
+                        "-t"|"--topic")
+                            # this flag expects a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-m --maintainer -t --topic -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg admin team"*)
+                    case "${prev}" in
+                        "-a"|"--add"|"-r"|"--remove")
+                            COMPREPLY=($(compgen -W "$teams" -- ${cur}))
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-a --add -c --check -l --list -r --remove -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg admin topic"*)
+                    case "${prev}" in
+                        "-a"|"--add"|"-r"|"--remove"|"-j"|"--jobs")
+                            # this flag expects a parameter
+                            COMPREPLY=()
+                            ;;
+                        *)
+                            COMPREPLY=($(compgen -W "-a --add -r --remove -d --delete -j --jobs -h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                            ;;
+                    esac
+                    ;;
+                "artixpkg admin transfer"*)
+                    COMPREPLY=($(compgen -W "-h --help $(_artixpkg_pkgbase)" -- ${cur}))
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+complete -F _artixpkg_completion artixpkg

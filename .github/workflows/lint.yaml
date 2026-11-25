@@ -1,0 +1,30 @@
+name: Artools shellcheck
+run-name: ${{ gitea.actor }}
+on:
+  push:
+    branches:
+      - artools/0.33.x
+      - master
+    tags:
+      - 0.*
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@main
+      - name: build
+        run: make
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        env:
+          SHELLCHECK_OPTS: -x -e SC2034
+        with:
+          scandir: './build/bin'
+          format: tty
+          severity: error
+          additional_files: 'contrib/completion/bash/artools'
+

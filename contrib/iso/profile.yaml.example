@@ -1,0 +1,30 @@
+---
+
+# required
+live-session:
+    user: "artix"
+    password: "artix"
+    autologin: true
+    use-xlibre: false
+    services: []
+    user-services: []
+
+# required
+rootfs:
+    packages: []
+    packages-init:
+        dinit: []
+        openrc: []
+        runit: []
+        s6: []
+
+# optional
+livefs:
+    packages: []
+    # optional
+    packages-init:
+        dinit: []
+        openrc: []
+        runit: []
+        s6: []
+

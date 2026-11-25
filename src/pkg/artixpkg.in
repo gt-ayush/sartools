@@ -1,0 +1,94 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+DATADIR=${DATADIR:-'@datadir@'}
+SYSCONFDIR=${SYSCONFDIR:-'@sysconfdir@/artools'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/pkg/api/gitea.sh
+source "${LIBDIR}"/pkg/api/gitea.sh
+
+set -e
+
+
+usage() {
+    local -r COMMAND=${BASH_SOURCE[0]##*/}
+    cat <<- _EOF_
+    Usage: ${COMMAND} [COMMAND] [OPTIONS]
+
+    COMMANDS
+        admin     Manage topics, teams and obsolete repos
+        git       Manage Git packaging repositories and their configuration
+        repo      Pacman database modification for package updates, moves, etc.
+        version   Check and manage package versions against upstream
+
+    OPTIONS
+        -h, --help     Show this help text
+_EOF_
+}
+
+if (( $# < 1 )); then
+    usage
+    exit 1
+fi
+
+export _ARTOOLS_COMMAND='artixpkg'
+
+# shellcheck source=src/lib/pkg/util.sh
+source "${LIBDIR}"/pkg/util.sh
+
+cd "${TREE_DIR_ARTIX}"
+
+# command checking
+while (( $# )); do
+	case $1 in
+    -h|--help)
+        usage
+        exit 0
+    ;;
+    repo)
+        _ARTOOLS_COMMAND+=" $1"
+        shift
+        # shellcheck source=src/lib/pkg/repo.sh
+        source "${LIBDIR}"/pkg/repo.sh
+        artixpkg_repo "$@"
+        exit 0
+    ;;
+    git)
+        _ARTOOLS_COMMAND+=" $1"
+        shift
+        # shellcheck source=src/lib/pkg/git.sh
+        source "${LIBDIR}"/pkg/git.sh
+        artixpkg_git "$@"
+        exit 0
+    ;;
+    admin)
+        _ARTOOLS_COMMAND+=" $1"
+        shift
+        # shellcheck source=src/lib/pkg/admin.sh
+        source "${LIBDIR}"/pkg/admin.sh
+        artixpkg_admin "$@"
+        exit 0
+    ;;
+    version)
+        _ARTOOLS_COMMAND+=" $1"
+        shift
+        # shellcheck source=src/lib/pkg/version.sh
+        source "${LIBDIR}"/pkg/version.sh
+        artixpkg_version "$@"
+        exit 0
+    ;;
+    --version|-V)
+        _ARTOOLS_COMMAND+=" $1"
+        shift
+        artixpkg_version_print
+        exit 0
+    ;;
+    *)
+        die "invalid command: %s" "$1"
+    ;;
+    esac
+done

@@ -1,0 +1,170 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/pkg/util/diff.sh
+source "${LIBDIR}"/pkg/util/diff.sh
+
+usage() {
+    cat <<- _EOF_
+        Usage: ${BASH_SOURCE[0]##*/} [OPTIONS]
+
+        Searches for a locally built package corresponding to the PKGBUILD, and
+        downloads the last version of that package from the Pacman repositories.
+        It then compares the list of .so files provided by each version of the
+        package and outputs if there are soname differences for the new package.
+        A directory is also created using mktemp with files containing a file
+        list for both packages and a library list for both packages.
+
+        OPTIONS
+            -r, --rmdir          Remove the temporary directory
+            -w, --warn           Print a warning in case of differences
+            -M, --makepkg-config Set an alternate makepkg configuration file
+            -h, --help           Show this help text
+_EOF_
+}
+
+RMDIR=0
+WARN=0
+MAKEPKG_CONF=/etc/makepkg.conf
+
+# option checking
+while (( $# )); do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -r|--rmdir)
+            RMDIR=1
+            shift
+            ;;
+        -w|--warn)
+            WARN=1
+            shift
+            ;;
+        -M|--makepkg-config)
+            MAKEPKG_CONF="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        --*|-*)
+            die "invalid argument: %s" "$1"
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Source makepkg.conf; fail if it is not found
+if [[ -r "${MAKEPKG_CONF}" ]]; then
+    # shellcheck source=config/makepkg/x86_64.conf
+    source "${MAKEPKG_CONF}"
+else
+    die "${MAKEPKG_CONF} not found!"
+fi
+
+# Source user-specific makepkg.conf overrides
+if [[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf" ]]; then
+    # shellcheck source=config/makepkg/x86_64.conf
+    source "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf"
+elif [[ -r "$HOME/.makepkg.conf" ]]; then
+    # shellcheck source=config/makepkg/x86_64.conf
+    source "$HOME/.makepkg.conf"
+fi
+
+if [[ ! -f PKGBUILD ]]; then
+    die 'This must be run in the directory of a built package.'
+fi
+
+# shellcheck source=contrib/makepkg/PKGBUILD.proto
+. ./PKGBUILD
+if [[ ${arch[0]} == 'any' ]]; then
+    CARCH='any'
+fi
+
+STARTDIR=$(pwd)
+(( RMDIR )) && trap 'rm -rf $TEMPDIR' EXIT INT TERM QUIT
+TEMPDIR=$(mktemp -d --tmpdir checkpkg-script.XXXX)
+
+changed=0
+
+for _pkgname in "${pkgname[@]}"; do
+    comparepkg=$_pkgname
+    pkgurl=
+    target_pkgver=$(get_full_version "$_pkgname")
+    if ! pkgfile=$(find_cached_package "$_pkgname" "$target_pkgver" "$CARCH"); then
+        die 'tarball not found for package: %s' "${_pkgname}-$target_pkgver"
+    fi
+
+    ln -s "$pkgfile" "$TEMPDIR"
+
+    if (( $# )); then
+        case $1 in
+            *://*)
+                pkgurl=$1 ;;
+            /*|*/*)
+                pkgurl=$(readlink -m "$1") ;;
+            *.pkg.tar*)
+                pkgurl=$1 ;;
+            '')
+                ;;
+            *)
+                comparepkg=$1 ;;
+        esac
+        shift
+    fi
+    [[ -n $pkgurl ]] || pkgurl=$(pacman -Spdd --print-format '%l' --noconfirm "$comparepkg") ||
+        die "Couldn't download previous package for %s." "$comparepkg"
+
+    oldpkg=${pkgurl##*/}
+
+    if [[ ${oldpkg} = "${pkgfile##*/}" ]]; then
+        die "The built package (%s) is the one in the repo right now!" "$_pkgname"
+    fi
+
+    if [[ $pkgurl = file://* || ( $pkgurl = /* && -f $pkgurl ) ]]; then
+        ln -s "${pkgurl#file://}" "$TEMPDIR/$oldpkg"
+    elif [[ -f "$PKGDEST/$oldpkg" ]]; then
+        ln -s "$PKGDEST/$oldpkg" "$TEMPDIR/$oldpkg"
+    elif [[ -f "$STARTDIR/$oldpkg" ]]; then
+        ln -s "$STARTDIR/$oldpkg" "$TEMPDIR/$oldpkg"
+    else
+        curl -fsLC - --retry 3 --retry-delay 3 -o "$TEMPDIR/$oldpkg" "$pkgurl"
+    fi
+
+    bsdtar tf "$TEMPDIR/$oldpkg" | sort > "$TEMPDIR/filelist-$_pkgname-old"
+    bsdtar tf "$pkgfile" | sort > "$TEMPDIR/filelist-$_pkgname"
+
+    sdiff -s "$TEMPDIR/filelist-$_pkgname-old" "$TEMPDIR/filelist-$_pkgname"
+
+    find-libprovides "$TEMPDIR/$oldpkg" 2>/dev/null | sort > "$TEMPDIR/libraries-$_pkgname-old"
+    find-libprovides "$pkgfile" 2>/dev/null | sort > "$TEMPDIR/libraries-$_pkgname"
+    if ! diff_output="$(sdiff -s "$TEMPDIR/libraries-$_pkgname-old" "$TEMPDIR/libraries-$_pkgname")"; then
+        message="Sonames differ in $_pkgname!"
+        if (( WARN )); then
+            warning "$message"
+        else
+            msg "$message"
+        fi
+        printf "%s\n" "$diff_output" 2>&1 | tee "${pkgfile##*/}-checkpkg.log"
+        changed=1
+    else
+        msg "No soname differences for %s." "$_pkgname"
+    fi
+done
+
+if ! (( RMDIR )); then
+    msg "Files saved to %s" "$TEMPDIR"
+fi
+
+exit "$changed"
+

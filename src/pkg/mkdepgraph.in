@@ -1,0 +1,67 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+mk_tree_graph(){
+    printf "%s\n" "$(pactree "${tree_args[@]}" "${package}")" \
+        | dot -T "${ext}" > "${graph_dir}/${package}.${ext}"
+}
+
+mk_rebuild_graph(){
+    local tmpfile
+    tmpfile=/tmp/rebuild.dot
+    rebuild_args+=(-d "${tmpfile}")
+    artix-rebuild-order "${packages[@]}" "${rebuild_args[@]}"
+    dot -T "${ext}" "${tmpfile}" > "${graph_dir}/rebuild.${ext}"
+    rm -f "${tmpfile}"
+}
+
+usage() {
+    printf "Usage: %s [options] <package|packages>\n" "${0##*/}"
+    printf "    -m <tree|rebuild>    default mode: [%s]\n" "$mode"
+    printf "                         rebuild mode accepts packages input\n"
+    printf "    -r                   list packages that depend on the named package (tree)\n"
+    printf "    -u                   show dependencies with no duplicates  (tree)\n"
+    printf "    -d <#>               limit the depth of recursion  (tree)\n"
+    printf "                         default: [%s]\n" "$depth"
+    printf "    -o <#>               controls at which depth to stop printing optional deps\n"
+    printf "                         default: [%s]\n" "$optdepth"
+    printf "                         (-1 for no limit)  (tree)\n"
+    printf "    -i                   only use the pkgnames provided as input (rebuild)\n"
+    printf "    -h                   display this help message\n"
+    exit "$1"
+}
+
+graph_dir=${XDG_PICTURES_DIR:-$(xdg-user-dir PICTURES)/artix}
+ext="png"
+
+mode=tree
+
+tree_args=(-gs)
+rebuild_args=()
+
+depth=0
+optdepth=-1
+
+opts=':m:d:o:iruh'
+
+while getopts "$opts" arg; do
+    case "${arg}" in
+        m) mode="$OPTARG" ;;
+        r) tree_args+=(-r) ;;
+        u) tree_args+=(-ul) ;;
+        d) depth="$OPTARG"; tree_args+=(-d "$depth") ;;
+        o) optdepth="$OPTARG"; tree_args+=(-o"$optdepth") ;;
+        i) rebuild_args+=(--no-reverse-depends) ;;
+        h|?) usage 0 ;;
+    esac
+done
+shift $(( OPTIND - 1 ))
+
+[[ -d "${graph_dir}" ]] || mkdir -p "${graph_dir}"
+
+case "$mode" in
+    tree) package=("$@"); mk_tree_graph ;;
+    rebuild) packages=("$@"); mk_rebuild_graph ;;
+    *) usage 1 ;;
+esac

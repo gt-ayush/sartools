@@ -1,0 +1,334 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/pkg/util/diff.sh
+source "${LIBDIR}"/pkg/util/diff.sh
+
+usage() {
+    cat <<- _EOF_
+    Usage: ${BASH_SOURCE[0]##*/} [OPTIONS] [MODES] [FILE|PKGNAME...]
+
+    Searches for a locally built package corresponding to the PKGBUILD, and
+    downloads the last version of that package from the Pacman repositories.
+    It then compares the package archives using different modes while using
+    simple tar content list by default.
+
+    When given one package, use it to diff against the locally built one.
+    When given two packages, diff both packages against each other.
+
+    In either case, a package name will be converted to a filename from the
+    cache, and diffpkg will proceed as though this filename was initially
+    specified.
+
+    OPTIONS
+        -M, --makepkg-config Set an alternate makepkg configuration file
+        -v, --verbose        Provide more detailed/unfiltered output
+        -h, --help           Show this help text
+
+    MODES
+        -l, --list           Activate content list diff mode (default)
+        -d, --diffoscope     Activate diffoscope diff mode
+        -p, --pkginfo        Activate .PKGINFO diff mode
+        -b, --buildinfo      Activate .BUILDINFO diff mode
+_EOF_
+}
+
+MAKEPKG_CONF=/etc/makepkg.conf
+POOLDIR=/srv/pkgpool
+
+VERBOSE=0
+TARLIST=0
+DIFFOSCOPE=0
+PKGINFO=0
+BUILDINFO=0
+
+DIFFMODE=--side-by-side
+DIFFCOLOR=--color=auto
+DIFFWIDTH=--width=auto
+DIFFOPTIONS=(--expand-tabs)
+
+# option checking
+while (( $# )); do
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+        ;;
+        -M|--makepkg-config)
+            (( $# <= 1 )) && die "missing argument for %s" "$1"
+            MAKEPKG_CONF="$2"
+            shift 2
+        ;;
+        -l|--list)
+            TARLIST=1
+            shift
+        ;;
+        -d|--diffoscope)
+            DIFFOSCOPE=1
+            shift
+        ;;
+        -p|--pkginfo)
+            PKGINFO=1
+            shift
+        ;;
+        -b|--buildinfo)
+            BUILDINFO=1
+            shift
+        ;;
+        -v|--verbose)
+            VERBOSE=1
+            shift
+        ;;
+        -u|-U|--unified)
+            DIFFMODE=--unified
+            shift
+        ;;
+        -y|--side-by-side)
+            DIFFMODE=--side-by-side
+            shift
+        ;;
+        --color|--color=*)
+            if [[ $2 == never || $2 == always || $2 == auto ]]; then
+                DIFFCOLOR="--color=$2"
+                shift 2
+                continue
+            fi
+            if [[ $1 == --color ]]; then
+                DIFFCOLOR="--color=auto"
+            else
+                DIFFCOLOR="$1"
+            fi
+            shift
+        ;;
+        -W|--width)
+            (( $# <= 1 )) && die "missing argument for %s" "$1"
+            DIFFWIDTH="--width=$2"
+            shift 2
+        ;;
+        --width=*)
+            DIFFWIDTH="$1"
+            shift
+        ;;
+        -P|--pool)
+            (( $# <= 1 )) && die "missing argument for %s" "$1"
+            POOLDIR="$2"
+            shift 2
+        ;;
+        --pool=*)
+            POOLDIR="${1#*=}"
+            shift
+        ;;
+        --)
+            shift
+            break
+        ;;
+        --*|-*)
+            die "invalid argument: %s" "$1"
+        ;;
+        *)
+            break
+        ;;
+    esac
+done
+
+# Set options based on flags or magic values
+if (( VERBOSE )); then
+    if [[ $DIFFMODE == --unified ]]; then
+        DIFFMODE="--unified=99999"
+    fi
+else
+    DIFFOPTIONS+=(--suppress-common-lines)
+fi
+if [[ $DIFFWIDTH == --width=columns ]]; then
+    DIFFWIDTH="--width=${COLUMNS:-130}"
+fi
+if [[ $DIFFWIDTH != --width=auto ]]; then
+    DIFFOPTIONS+=("${DIFFWIDTH}")
+fi
+DIFFOPTIONS+=("${DIFFMODE}" "${DIFFCOLOR}")
+
+if ! (( DIFFOSCOPE || TARLIST || PKGINFO || BUILDINFO )); then
+    TARLIST=1
+fi
+
+# Source makepkg.conf; fail if it is not found
+if [[ -r "${MAKEPKG_CONF}" ]]; then
+    # shellcheck source=config/makepkg/x86_64.conf
+    source "${MAKEPKG_CONF}"
+else
+    die "${MAKEPKG_CONF} not found!"
+fi
+
+# Source user-specific makepkg.conf overrides
+if [[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf" ]]; then
+    # shellcheck source=/dev/null
+    source "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf"
+elif [[ -r "$HOME/.makepkg.conf" ]]; then
+    # shellcheck source=/dev/null
+    source "$HOME/.makepkg.conf"
+fi
+
+STARTDIR=$(pwd)
+trap 'rm -rf $TMPDIR' EXIT INT TERM QUIT
+TMPDIR=$(mktemp -d --tmpdir diffpkg-script.XXXXXXXX)
+export TMPDIR
+
+tar_list() {
+    bsdtar tf "$*" | if (( VERBOSE )); then
+        cat
+    else
+        sed -E 's|^usr/lib/modules/[0-9][^/]+|usr/lib/modules/[…]|g'
+    fi | sort
+}
+
+file_line_length() {
+    path="$1"
+    wc -L "${path}" | tail -n1 | sed -E 's/^ +//g' | cut -d' ' -f1
+}
+
+file_diff_columns() {
+    file1="$1"
+    file2="$2"
+    file1_length=$(file_line_length "$file1")
+    file2_length=$(file_line_length "$file2")
+    echo $(( file1_length + file2_length + 3 ))
+}
+
+diff_pkgs() {
+    local oldpkg newpkg
+    oldpkg=$(readlink -m "$1")
+    newpkg=$(readlink -m "$2")
+
+    [[ -f $oldpkg ]] || die "No such file: %s" "${oldpkg}"
+    [[ -f $newpkg ]] || die "No such file: %s" "${newpkg}"
+
+    local -a diffoptions
+    diffoptions=("${DIFFOPTIONS[@]}" --label "${oldpkg}" --label "${newpkg}")
+
+    if (( TARLIST )); then
+        tar_list "$oldpkg" > "$TMPDIR/old"
+        tar_list "$newpkg" > "$TMPDIR/new"
+    fi
+
+    if (( PKGINFO )); then
+        bsdtar xOqf "$oldpkg" .PKGINFO > "$TMPDIR/old"
+        bsdtar xOqf "$newpkg" .PKGINFO > "$TMPDIR/new"
+    fi
+
+    if (( BUILDINFO )); then
+        bsdtar xOqf "$oldpkg" .BUILDINFO > "$TMPDIR/old"
+        bsdtar xOqf "$newpkg" .BUILDINFO > "$TMPDIR/new"
+    fi
+
+    if (( TARLIST || PKGINFO || BUILDINFO )); then
+    # Resolve dynamic auto width one we know the content to diff
+        if [[ $DIFFWIDTH == --width=auto ]]; then
+            AUTOLENGTH=$(file_diff_columns "$TMPDIR/old" "$TMPDIR/new")
+            diffoptions+=("--width=${AUTOLENGTH}")
+        fi
+
+        # Print a header for side-by-side view as it lacks labels
+        if [[ $DIFFMODE == --side-by-side ]]; then
+            printf -- "--- %s\n+++ %s\n" "${oldpkg}" "${newpkg}"
+        fi
+
+        diff "${diffoptions[@]}" "$TMPDIR/old" "$TMPDIR/new"
+    fi
+
+    if (( DIFFOSCOPE )); then
+        diffoscope "${DIFFCOLOR/--color/--text-color}" "$oldpkg" "$newpkg"
+    fi
+}
+
+shopt -s extglob
+
+fetch_pkg() {
+    local pkg pkgdest pkgurl
+    case $1 in
+        *://*)
+            pkgurl=$1 ;;
+        /*|*/*)
+            pkgurl=$(readlink -m "$1") ;;
+        *.pkg.tar*)
+            pkgurl=$1 ;;
+        '')
+        ;;
+        *)
+            pkg=$1 ;;
+    esac
+
+    if [[ -z ${pkgurl} ]]; then
+        # Try to find latest package in pool dir
+        if [[ -d ${POOLDIR} ]]; then
+            shopt -s extglob nullglob
+            pkgurl=$(printf "%s\n" "${POOLDIR}"/*/"${_pkgname}"-!(*-*)-!(*-*)-!(*-*).pkg.tar!(*.sig)|sort -Vr|head -1)
+            shopt -u extglob nullglob
+        fi
+        # Search via pacman database if no pool file exists
+        if [[ ! -f ${pkgurl} ]]; then
+            pkgurl=$(pacman -Spdd --print-format '%l' --noconfirm "$pkg") ||
+            die "Couldn't download previous package for %s." "$pkg"
+        fi
+    fi
+
+    pkg=${pkgurl##*/}
+    pkgdest=$(mktemp -t -d "${pkg}-XXXXXX")/${pkg}
+
+    if [[ $pkgurl = file://* || ( $pkgurl = /* && -f $pkgurl ) ]]; then
+        ln -sf "${pkgurl#file://}" "$pkgdest"
+    elif [[ -f "$PKGDEST/$pkg" ]]; then
+        ln -sf "$PKGDEST/$pkg" "$pkgdest"
+    elif [[ -f "$STARTDIR/$pkg" ]]; then
+        ln -sf "$STARTDIR/$pkg" "$pkgdest"
+    elif [[ $pkgurl = *://* ]]; then
+        curl -fsLC - --retry 3 --retry-delay 3 -o "$pkgdest" "$pkgurl" || \
+        die "Couldn't download %s" "$pkgurl"
+    else
+        die "File not found: %s" "$pkgurl"
+    fi
+
+    echo "$pkgdest"
+}
+
+shopt -u extglob
+
+if (( $# < 2 )); then
+    if [[ ! -f PKGBUILD ]]; then
+        die "This must be run in the directory of a built package.\nTry '$(basename "$0") --help' for more information."
+    fi
+
+    # shellcheck source=contrib/makepkg/PKGBUILD.proto
+    . ./PKGBUILD
+    if [[ ${arch[0]} == 'any' ]]; then
+        CARCH='any'
+    fi
+
+    for _pkgname in "${pkgname[@]}"; do
+        comparepkg=$_pkgname
+        pkgurl=
+        target_pkgver=$(get_full_version "$_pkgname")
+        if ! pkgfile=$(find_cached_package "$_pkgname" "$target_pkgver" "$CARCH"); then
+            die 'tarball not found for package: %s' "${_pkgname}-$target_pkgver"
+        fi
+
+        ln -s "$pkgfile" "$TMPDIR"
+
+        if (( $# )); then
+            comparepkg="$1"
+        fi
+
+        oldpkg=$(fetch_pkg "$comparepkg") || exit 1
+
+        diff_pkgs "$oldpkg" "$pkgfile"
+    done
+else
+    file1=$(fetch_pkg "$1") || exit 1
+    file2=$(fetch_pkg "$2") || exit 1
+
+    diff_pkgs "$file1" "$file2"
+fi

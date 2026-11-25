@@ -1,0 +1,112 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/base/chroot.sh
+source "${LIBDIR}"/base/chroot.sh
+# shellcheck source=src/lib/pkg/util.sh
+source "${LIBDIR}"/pkg/util.sh
+
+shopt -s nullglob
+
+chrootdir=
+makepkg_user=
+passeddir="${CHROOTS_DIR}/buildpkg"
+
+arch=${ARCH}
+repo=${REPO}
+
+copy=$USER
+[[ -n ${SUDO_USER:-} ]] && copy=$SUDO_USER
+[[ -z "$copy" || $copy = root ]] && copy=copy
+
+usage() {
+    printf 'Usage: %s [options] -r <chrootdir>\n' "${0##*/}"
+    printf '    -r <dir>           Create chroots in this directory\n'
+    printf '                       Default: %s\n' "${passeddir}"
+    printf '    -d <dest>          Destination repo chroot\n'
+    printf '                       Default: %s\n' "${repo}"
+    printf '    -a <arch>          Build arch chroot\n'
+    printf '                       Default: %s\n' "${arch}"
+    printf '    -l <copy>          The directory to use as the working copy of the chroot\n'
+    printf '                       Useful for maintaining multiple copies\n'
+    printf '                       Default: %s\n' "$copy"
+    printf '    -U                 Run makepkg as a specified user\n'
+    exit 1
+}
+
+opts='hr:l:U:d:a:'
+
+while getopts "${opts}" arg; do
+    case "$arg" in
+        r) passeddir="$OPTARG" ;;
+        l) copy="$OPTARG" ;;
+        U) makepkg_user="$OPTARG" ;;
+        d) repo="$OPTARG" ;;
+        a) arch="$OPTARG" ;;
+        h|*) usage ;;
+    esac
+done
+
+[[ ! -f PKGBUILD ]] && die 'This must be run in a directory containing a PKGBUILD.'
+[[ -n $makepkg_user && -z $(id -u "$makepkg_user") ]] && die 'Invalid makepkg user.'
+makepkg_user=${makepkg_user:-${SUDO_USER:-$USER}}
+
+check_root "" "${BASH_SOURCE[0]}" "$@"
+
+# # Canonicalize chrootdir, getting rid of trailing /
+chrootdir=$(readlink -e "$passeddir")
+
+chrootdir="$chrootdir"/"${repo}-${arch}"
+
+[[ ! -d $chrootdir ]] && die "No chroot dir defined, or invalid path '%s'" "$passeddir"
+[[ ! -d $chrootdir/root ]] && die "Missing chroot dir root directory. Try using: mkchroot %s/root base-devel" "$chrootdir"
+
+if [[ ${copy:0:1} = / ]]; then
+    copydir=$copy
+else
+    copydir="$chrootdir/$copy"
+fi
+
+umask 0022
+
+ORIG_HOME=$HOME
+IFS=: read -r _ _ _ _ _ HOME _ < <(getent passwd "${SUDO_USER:-$USER}")
+# shellcheck source=config/makepkg/x86_64.conf
+load_makepkg_config
+HOME=$ORIG_HOME
+
+[[ -d $PKGDEST ]]    || PKGDEST=$PWD
+[[ -d $SRCDEST ]]    || SRCDEST=$PWD
+[[ -d $SRCPKGDEST ]] || SRCPKGDEST=$PWD
+[[ -d $LOGDEST ]]    || LOGDEST=$PWD
+
+msg "Running checkpkg"
+mapfile -t pkgnames < <(bash -c 'source PKGBUILD; printf "%s\n" "${pkgname[@]}"')
+
+mapfile -t remotepkgs < <(pacman --config "$copydir"/etc/pacman.conf \
+    --dbpath "$copydir"/var/lib/pacman \
+    -Sddp "${pkgnames[@]}")
+
+if ! wait $!; then
+    warning "Skipped checkpkg due to missing repo packages"
+    exit 0
+fi
+
+# download package files if any non-local location exists
+for remotepkg in "${remotepkgs[@]}"; do
+    if [[ $remotepkg != file://* ]]; then
+        msg2 "Downloading current versions"
+        chroot-run "$copydir" pacman --noconfirm -Swdd "${pkgnames[@]}"
+        mapfile -t remotepkgs < <(pacman --config "$copydir"/etc/pacman.conf \
+            --dbpath "$copydir"/var/lib/pacman \
+            -Sddp "${pkgnames[@]}")
+        break
+    fi
+done
+
+sudo -u "$makepkg_user" checkpkg --rmdir --warn --makepkg-config "$copydir/etc/makepkg.conf" "${remotepkgs[@]/#file:\/\//}"

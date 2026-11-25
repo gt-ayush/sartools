@@ -1,0 +1,46 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/pkg/util/deploy.sh
+source "${LIBDIR}"/pkg/util/deploy.sh
+
+# shellcheck source=config/makepkg/x86_64.conf
+load_makepkg_config
+
+passfiles=("$@")
+
+sign_pkg(){
+    local file_to_sign="$1"
+
+    if [ ! -e "$file_to_sign" ]; then
+        error "%s does not exist!" "$file_to_sign"
+        exit 1
+    fi
+
+    if [[ -n "${BUILDBOT_GPGP}" ]]; then
+        msg "Signing [%s]" "${file_to_sign##*/}"
+        gpg --batch --passphrase "${BUILDBOT_GPGP}" --detach-sign "$file_to_sign"
+    else
+        msg "Signing [%s] with key %s" "${file_to_sign##*/}" "${GPGKEY}..."
+        gpg --detach-sign --use-agent -u "${GPGKEY}" "$file_to_sign"
+    fi
+}
+
+for pkg in "${passfiles[@]}"; do
+    msg "Searching %s ..." "$pkg"
+    if pkgfile=$(find_cached_pkgfile "$pkg");then
+        msg2 "Found: %s" "${pkgfile}"
+        [[ -e "${pkgfile}".sig ]] && rm "${pkgfile}".sig
+        sign_pkg "${pkgfile}"
+        ret=0
+    else
+        ret=1
+    fi
+done
+
+exit "$ret"

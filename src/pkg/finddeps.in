@@ -1,0 +1,43 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+
+match=$1
+
+if [[ -z $match ]]; then
+    printf 'Usage: finddeps <depname>\n'
+    printf '\n'
+    printf 'Find packages that depend on a given depname.\n'
+    printf 'Run this script from the top-level directory of your ABS tree.\n'
+    printf '\n'
+    exit 1
+fi
+
+find . -type d -print0 2>/dev/null| while read -r -d '' d; do
+    if [[ -f "$d/PKGBUILD" ]]; then
+        pkgname=() depends=() makedepends=() optdepends=()
+        # shellcheck source=contrib/makepkg/PKGBUILD.proto
+        . "$d/PKGBUILD"
+        for dep in "${depends[@]}"; do
+            # lose the version comparator, if any
+            depname=${dep%%[<>=]*}
+            [[ $depname = "$match" ]] && msg "$d (depends)"
+        done
+        for dep in "${makedepends[@]}"; do
+            # lose the version comparator, if any
+            depname=${dep%%[<>=]*}
+            [[ $depname = "$match" ]] && msg "$d (makedepends)"
+        done
+        for dep in "${optdepends[@]/:*}"; do
+            # lose the version comaparator, if any
+            depname=${dep%%[<>=]*}
+            [[ $depname = "$match" ]] && msg "$d (optdepends)"
+        done
+    fi
+done
+

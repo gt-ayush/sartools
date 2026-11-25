@@ -1,0 +1,435 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+# shellcheck source=src/lib/base/message.sh
+source "${LIBDIR}"/base/message.sh
+# shellcheck source=src/lib/base/chroot.sh
+source "${LIBDIR}"/base/chroot.sh
+
+export BUILDTOOL=@buildtool@
+export BUILDTOOLVER=@buildtoolver@
+
+shopt -s nullglob
+
+default_makepkg_args=(--syncdeps --noconfirm --log --holdver --skipinteg)
+makepkg_args=("${default_makepkg_args[@]}")
+verifysource_args=()
+chrootdir=
+passeddir=
+makepkg_user=
+declare -a install_pkgs
+declare -i ret=0
+
+keepbuilddir=0
+update_first=0
+clean_first=0
+run_namcap=0
+run_checkpkg=0
+temp_chroot=0
+tmp_opts="nosuid,nodev,size=50%,nr_inodes=2m"
+
+bindmounts=''
+
+copy=$USER
+[[ -n ${SUDO_USER:-} ]] && copy=$SUDO_USER
+[[ -z "$copy" || $copy = root ]] && copy=copy
+src_owner=${SUDO_USER:-$USER}
+
+usage() {
+    printf 'Usage: %s [options] -r <chrootdir> [--] [makepkg args]\n' "${0##*/}"
+    printf ' Run this script in a PKGBUILD dir to build a package inside a\n'
+    printf ' clean chroot. Arguments passed to this script after the\n'
+    printf ' end-of-options marker (--) will be passed to makepkg.\n'
+    printf '\n'
+    printf ' The chroot dir consists of the following directories:\n'
+    printf ' <chrootdir>/{root, copy} but only "root" is required\n'
+    printf ' by default. The working copy will be created as needed\n'
+    printf '\n'
+    printf 'The chroot "root" directory must be created via the following\n'
+    printf 'command:\n'
+    printf '    mkchroot <chrootdir>/root base-devel\n'
+    printf '\n'
+    printf 'This script reads {SRC,SRCPKG,PKG,LOG}DEST, NPROC, MAKEFLAGS and\n'
+    printf 'PACKAGER from makepkg.conf(5), if those variables are not part of\n'
+    printf 'the environment.\n'
+    printf '\n'
+    printf 'Default makepkg args: %s\n' "${default_makepkg_args[*]}"
+    printf '\n'
+    printf 'Flags:\n'
+    printf ' -h         This help\n'
+    printf ' -c         Clean the chroot before building\n'
+    printf ' -b <arg>   Bind mount directory/file into build chroot\n'
+    printf ' -u         Update the working copy of the chroot before building\n'
+    printf '            This is useful for rebuilds without dirtying the pristine\n'
+    printf '            chroot\n'
+    printf ' -r <dir>   The chroot dir to use\n'
+    printf ' -I <pkg>   Install a package into the working copy of the chroot\n'
+    printf ' -l <copy>  The directory to use as the working copy of the chroot\n'
+    printf '            Useful for maintaining multiple copies\n'
+    printf '            Default: %s\n' "$copy"
+    printf ' -n         Run namcap on the package\n'
+    printf ' -N         Disable check() function\n'
+    printf ' -C         Run checkpkg on the package\n'
+    printf ' -T         Build in a temporary directory\n'
+    printf ' -U         Run makepkg as a specified user\n'
+    exit 1
+}
+
+# {{{ functions
+# Usage: sync_chroot $chrootdir $copydir [$copy]
+sync_chroot() {
+    local chrootdir=$1
+    local copydir=$2
+    local copy=${3:-$2}
+
+    if [[ "$chrootdir/root" -ef "$copydir" ]]; then
+        error 'Cannot sync copy with itself: %s' "$copydir"
+        return 1
+    fi
+
+    # Get a read lock on the root chroot to make
+    # sure we don't clone a half-updated chroot
+    slock 8 "$chrootdir/root.lock" \
+        "Locking clean chroot [%s]" "$chrootdir/root"
+
+    stat_busy "Synchronizing chroot copy [%s] -> [%s]" "$chrootdir/root" "$copy"
+    if is_btrfs "$chrootdir" && ! mountpoint -q "$copydir"; then
+        subvolume_delete_recursive "$copydir" ||
+            die "Unable to delete subvolume %s" "$copydir"
+        btrfs subvolume snapshot "$chrootdir/root" "$copydir" >/dev/null ||
+            die "Unable to create subvolume %s" "$copydir"
+    else
+        mkdir -p "$copydir"
+        rsync -a --delete -q -W -x "$chrootdir/root/" "$copydir"
+    fi
+    stat_done
+
+    # Drop the read lock again
+    lock_close 8
+
+    # Update mtime
+    touch "$copydir"
+}
+
+# Usage: delete_chroot $copydir [$copy]
+delete_chroot() {
+    local copydir=$1
+    local copy=${1:-$2}
+
+    stat_busy "Removing chroot copy [%s]" "$copy"
+    if is_subvolume "$copydir" && ! mountpoint -q "$copydir"; then
+        subvolume_delete_recursive "$copydir" ||
+            die "Unable to delete subvolume %s" "$copydir"
+    else
+        # avoid change of filesystem in case of an umount failure
+        rm --recursive --force --one-file-system "$copydir" ||
+            die "Unable to delete %s" "$copydir"
+    fi
+
+    # remove lock file
+    rm -f "$copydir.lock"
+    stat_done
+}
+
+install_packages() {
+    local -a pkgnames
+    local ret
+
+    pkgnames=("${install_pkgs[@]##*/}")
+
+    cp -- "${install_pkgs[@]}" "$copydir/root/"
+    chroot-run -b "${bindmounts}" "$copydir" \
+        pacman -U --noconfirm --ask=6 -- "${pkgnames[@]/#//root/}"
+    ret=$?
+    rm -- "${pkgnames[@]/#/$copydir/root/}"
+
+    return $ret
+}
+
+prepare_chroot() {
+    (( keepbuilddir )) || rm -rf "$copydir/build"
+
+    local builduser_uid builduser_gid
+    builduser_uid="$(id -u "$makepkg_user")"
+    builduser_gid="$(id -g "$makepkg_user")"
+    local install="install -o $builduser_uid -g $builduser_gid"
+    local x
+
+    # We can't use useradd without chrooting, otherwise it invokes PAM modules
+    # which we might not be able to load (i.e. when building i686 packages on
+    # an x86_64 host).
+    sed -e '/^builduser:/d' -i "$copydir"/etc/{passwd,shadow,group}
+    printf >>"$copydir/etc/group"  'builduser:x:%d:\n' "$builduser_gid"
+    printf >>"$copydir/etc/passwd" 'builduser:x:%d:%d:builduser:/build:/bin/bash\n' "$builduser_uid" "$builduser_gid"
+    printf >>"$copydir/etc/shadow" 'builduser:!!:%d::::::\n' "$(( $(date -u +%s) / 86400 ))"
+
+    $install -d "$copydir"/{build,startdir,{pkg,srcpkg,src,log}dest}
+
+    sed -e '/^NPROC=/d' -e '/^MAKEFLAGS=/d' -e '/^PACKAGER=/d' -i "$copydir/etc/makepkg.conf"
+    local nproc="${NPROC:-}" makeflags="${MAKEFLAGS:-}" packager="${PACKAGER:-}"
+    for x in BUILDDIR=/build PKGDEST=/pkgdest SRCPKGDEST=/srcpkgdest SRCDEST=/srcdest LOGDEST=/logdest \
+        "NPROC=${nproc@Q}" "MAKEFLAGS=${makeflags@Q}" "PACKAGER=${packager@Q}"
+    do
+        grep -q "^$x" "$copydir/etc/makepkg.conf" && continue
+        printf "%s\n" "$x" >>"$copydir/etc/makepkg.conf"
+    done
+
+    cat > "$copydir/etc/sudoers.d/builduser-pacman" <<EOF
+builduser ALL = NOPASSWD: /usr/bin/pacman
+EOF
+    chmod 440 "$copydir/etc/sudoers.d/builduser-pacman"
+
+    echo '
+[safe]
+   directory = *
+' >> "$copydir/etc/makepkg.d/gitconfig"
+    cp "$copydir/etc/makepkg.d/gitconfig" "$copydir/etc/gitconfig"
+
+    # This is a little gross, but this way the script is recreated every time in the
+    # working copy
+    {
+        printf '#!/bin/bash\n'
+        declare -f _chrootbuild
+        declare -p SOURCE_DATE_EPOCH 2>/dev/null || true
+        declare -p BUILDTOOL 2>/dev/null
+        declare -p BUILDTOOLVER 2>/dev/null
+        printf '_chrootbuild "$@" || exit\n'
+
+        if (( run_namcap )); then
+            declare -f _chrootnamcap
+            printf '_chrootnamcap || exit\n'
+        fi
+    } >"$copydir/chrootbuild"
+    chmod +x "$copydir/chrootbuild"
+}
+
+# These functions aren't run in makechrootpkg,
+# so no global variables
+_chrootbuild() {
+    # No coredumps
+    ulimit -c 0
+
+    # shellcheck disable=SC1091
+    . /etc/locale.conf
+
+    # shellcheck source=/dev/null
+    . /etc/profile
+
+    # Beware, there are some stupid arbitrary rules on how you can
+    # use "$" in arguments to commands with "sudo -i".  ${foo} or
+    # ${1} is OK, but $foo or $1 isn't.
+    # https://bugzilla.sudo.ws/show_bug.cgi?id=765
+    sudo --preserve-env=SOURCE_DATE_EPOCH \
+        --preserve-env=BUILDTOOL \
+        --preserve-env=BUILDTOOLVER \
+        -iu builduser bash -c 'cd /startdir; makepkg "$@"' -bash "$@"
+    ret=$?
+    case $ret in
+        0|14)
+            return 0;;
+        *)
+            return $ret;;
+    esac
+}
+
+_chrootnamcap() {
+    pacman -S --needed --noconfirm namcap
+    for pkgfile in /startdir/PKGBUILD /pkgdest/*; do
+        printf "Checking %s\n" "${pkgfile##*/}"
+        sudo -u builduser namcap "$pkgfile" 2>&1 | tee "/logdest/${pkgfile##*/}-namcap.log"
+    done
+}
+
+download_sources() {
+    setup_workdir
+    chown "$makepkg_user:" "$WORKDIR"
+
+    # Ensure sources are downloaded
+    sudo -u "$makepkg_user" --preserve-env=GNUPGHOME,SSH_AUTH_SOCK \
+        env SRCDEST="$SRCDEST" BUILDDIR="$WORKDIR" \
+        makepkg --config="$copydir/etc/makepkg.conf" --verifysource -o "${verifysource_args[@]}" ||
+        die "Could not download sources."
+}
+
+move_logfiles() {
+    local l
+    for l in "$copydir"/logdest/*; do
+        [[ $l == */logpipe.* ]] && continue
+        chown "$src_owner" "$l"
+        mv "$l" "$LOGDEST"
+    done
+}
+
+move_products() {
+    local pkgfile
+    for pkgfile in "$copydir"/pkgdest/*; do
+        chown "$src_owner" "$pkgfile"
+        mv "$pkgfile" "$PKGDEST"
+
+        # Fix broken symlink because of temporary chroot PKGDEST /pkgdest
+        if [[ "$PWD" != "$PKGDEST" && -L "$PWD/${pkgfile##*/}" ]]; then
+            # shellcheck disable=SC2226
+            ln -sf "$PKGDEST/${pkgfile##*/}"
+        fi
+    done
+
+    move_logfiles
+
+    for s in "$copydir"/srcpkgdest/*; do
+        chown "$src_owner" "$s"
+        mv "$s" "$SRCPKGDEST"
+
+        # Fix broken symlink because of temporary chroot SRCPKGDEST /srcpkgdest
+        if [[ "$PWD" != "$SRCPKGDEST" && -L "$PWD/${s##*/}" ]]; then
+            # shellcheck disable=SC2226
+            ln -sf "$SRCPKGDEST/${s##*/}"
+        fi
+    done
+}
+# }}}
+
+opts='hcur:I:l:nNCTb:U:'
+
+while getopts "${opts}" arg; do
+    case "$arg" in
+        c) clean_first=1 ;;
+        b) bindmounts="$OPTARG" ;;
+        u) update_first=1 ;;
+        r) passeddir="$OPTARG" ;;
+        I) install_pkgs+=("$OPTARG") ;;
+        l) copy="$OPTARG" ;;
+        n) run_namcap=1; makepkg_args+=(--install) ;;
+        N) makepkg_args+=(--nocheck) ;;
+        C) run_checkpkg=1 ;;
+        T) temp_chroot=1; copy+="-$$" ;;
+        U) makepkg_user="$OPTARG" ;;
+        h|*) usage ;;
+    esac
+done
+
+[[ ! -f PKGBUILD && -z "${install_pkgs[*]}" ]] && die 'This must be run in a directory containing a PKGBUILD.'
+[[ -n $makepkg_user && -z $(id -u "$makepkg_user") ]] && die 'Invalid makepkg user.'
+makepkg_user=${makepkg_user:-${SUDO_USER:-$USER}}
+
+check_root SOURCE_DATE_EPOCH,BUILDTOOL,BUILDTOOLVER,GNUPGHOME,SRCDEST,SRCPKGDEST,PKGDEST,LOGDEST,NPROC,MAKEFLAGS,PACKAGER "${BASH_SOURCE[0]}" "$@"
+
+# Canonicalize chrootdir, getting rid of trailing /
+chrootdir=$(readlink -e "$passeddir")
+[[ ! -d $chrootdir ]] && die "No chroot dir defined, or invalid path '%s'" "$passeddir"
+[[ ! -d $chrootdir/root ]] && die "Missing chroot dir root directory. Try using: mkchroot %s/root base-devel" "$chrootdir"
+
+if [[ ${copy:0:1} = / ]]; then
+    copydir=$copy
+else
+    copydir="$chrootdir/$copy"
+fi
+
+# Pass all arguments after -- right to makepkg
+makepkg_args+=("${@:$OPTIND}")
+
+# See if -R, -e or -A was passed to makepkg
+for arg in "${@:$OPTIND}"; do
+    case ${arg%%=*} in
+        --skip*|--holdver|--ignorearch) verifysource_args+=("$arg") ;;
+        --repackage|--noextract) keepbuilddir=1 ;;
+        --*) ;;
+        -*A*) verifysource_args+=(-A) ;;&
+        -*R*|-*e*) keepbuilddir=1 ;;&
+    esac
+done
+
+umask 0022
+
+ORIG_HOME=$HOME
+IFS=: read -r _ _ _ _ _ HOME _ < <(getent passwd "${SUDO_USER:-$USER}")
+load_makepkg_config
+HOME=$ORIG_HOME
+
+# Use PKGBUILD directory if these don't exist
+[[ -d $PKGDEST ]]    || PKGDEST=$PWD
+[[ -d $SRCDEST ]]    || SRCDEST=$PWD
+[[ -d $SRCPKGDEST ]] || SRCPKGDEST=$PWD
+[[ -d $LOGDEST ]]    || LOGDEST=$PWD
+
+# Lock the chroot we want to use. We'll keep this lock until we exit.
+lock 9 "$copydir.lock" "Locking chroot copy [%s]" "$copy"
+
+if [[ ! -d $copydir ]] || (( clean_first )); then
+    sync_chroot "$chrootdir" "$copydir" "$copy"
+fi
+
+(( update_first )) && chroot-run \
+        -b "${bindmounts}" \
+        "$copydir" \
+        pacman -Syuu --noconfirm
+
+if [[ -n ${install_pkgs[*]:-} ]]; then
+    install_packages
+    ret=$?
+    # If there is no PKGBUILD we are done
+    [[ -f PKGBUILD ]] || exit $ret
+fi
+
+if [[ "$(id -u "$makepkg_user")" == 0 ]]; then
+    error "Running makepkg as root is not allowed."
+    exit 1
+fi
+
+download_sources
+
+prepare_chroot
+
+if chroot-run \
+    -t "${tmp_opts}" \
+    -b "${bindmounts} -B:${PWD}:/startdir -B:${SRCDEST}:/srcdest" \
+    "$copydir" \
+    /chrootbuild "${makepkg_args[@]}"
+then
+    mapfile -t pkgnames < <(sudo -u "$makepkg_user" bash -c 'source PKGBUILD; printf "%s\n" "${pkgname[@]}"')
+    move_products
+else
+    (( ret += 1 ))
+    move_logfiles
+fi
+
+(( temp_chroot )) && delete_chroot "$copydir" "$copy"
+
+if (( ret != 0 )); then
+    if (( temp_chroot )); then
+        die "Build failed"
+    else
+        die "Build failed, check %s/build" "$copydir"
+    fi
+else
+    if (( run_checkpkg )); then
+        msg "Running checkpkg"
+
+        mapfile -t remotepkgs < <(pacman --config "$copydir"/etc/pacman.conf \
+            --dbpath "$copydir"/var/lib/pacman \
+            -Sddp "${pkgnames[@]}")
+
+        if ! wait $!; then
+            warning "Skipped checkpkg due to missing repo packages"
+            exit 0
+        fi
+
+        # download package files if any non-local location exists
+        for remotepkg in "${remotepkgs[@]}"; do
+            if [[ $remotepkg != file://* ]]; then
+                msg2 "Downloading current versions"
+                chroot-run "$copydir" pacman --noconfirm -Swdd "${pkgnames[@]}"
+                mapfile -t remotepkgs < <(pacman --config "$copydir"/etc/pacman.conf \
+                    --dbpath "$copydir"/var/lib/pacman \
+                    -Sddp "${pkgnames[@]}")
+                break
+            fi
+        done
+
+        msg2 "Checking packages"
+        sudo -u "$makepkg_user" checkpkg --rmdir --warn --makepkg-config "$copydir/etc/makepkg.conf" "${remotepkgs[@]/#file:\/\//}"
+    fi
+    true
+fi

@@ -1,0 +1,781 @@
+#compdef _artixpkg artixpkg
+
+LIBDIR=${LIBDIR:-'@libdir@'}
+
+source "${LIBDIR}"/pkg/db/db.sh 2>/dev/null
+
+agents=()
+for word in "${AGENTS[@]}"; do
+	[[ $word != -* ]] && agents+=("$word")
+done
+
+artix_db=()
+for word in "${ARTIX_DB[@]}"; do
+	[[ $word != -* ]] && artix_db+=("$word")
+done
+
+artix_db_map=()
+for word in "${ARTIX_DB_MAP[@]}"; do
+	[[ $word != -* ]] && artix_db_map+=("$word")
+done
+
+artix_teams=()
+for word in "${ARTIX_TEAMS[@]}"; do
+	[[ $word != -* ]] && artix_teams+=("$word")
+done
+
+_artixpkg_remotepkgbase() {
+	curl -s "https://checkupdates.artixlinux.org/api/1.0/packages?startswith=$1"
+}
+
+_artixpkg_maintainers() {
+	curl -s "https://checkupdates.artixlinux.org/api/1.0/maintainers"
+}
+
+_artixpkg_pkgbase() {
+	source "${LIBDIR}/pkg/util.sh"
+	ls -1 "${TREE_DIR_ARTIX}" | tr '\n' ' '
+}
+
+function _artixpkg { 
+	_arguments -C \
+		'1:command:->subcmd' \
+		'*::args:->args'
+
+	case $state in
+		subcmd)
+			local -a subcmds
+			subcmds=(
+				"--help:Show help text"
+				"-h:Show help text"
+				"admin:Manage topics, teams and obsolete repos"
+				"git:Manage Git packaging repositories and their configuration"
+				"repo:Pacman database modification for package updates, moves, etc."
+				"version:Show artixpkg version information"
+			)
+			_describe 'command' subcmds
+			return
+			;;
+		args)
+			case $words[1] in
+				admin)
+					_admin
+				;;
+				git)
+					_git
+				;;
+				repo)
+					_repo
+				;;
+				version)
+					_arguments \
+						'-h[Show help text]' \
+						'--help[Show help text]'
+				;;
+			esac
+		;;
+	esac
+}
+
+_admin() { 
+	local state
+
+	_arguments -C \
+		'1:admin-cmd:->admin-subcmd' \
+		'*::admin-arg:->admin-args'
+
+	case $state in
+		admin-subcmd)
+			local -a admin_subcommands
+			admin_subcommands=(
+				"-h:Show this help text"
+				"--help:Show this help text"
+				"maintainer:Manage repo maintainer"
+				"query:Query maintainers and topics"
+				"team:Manage repo team"
+				"topic:Manage topics"
+				"transfer:Transfer obsolete repository to landfill"
+			)
+			_describe 'admin-cmd' admin_subcommands
+			return
+		;;
+		admin-args)
+			case $words[1] in
+				maintainer)
+					_admin_maintainer
+				;;
+				query)
+					_admin_query
+				;;
+				team)
+					_admin_team
+				;;
+				topic)
+					_admin_topic
+				;;
+				transfer)
+					admin_transfer
+				;;
+			esac
+		;;
+	esac
+}
+
+_git() { 
+	local state
+	_arguments \
+		'1:git-cmd:->git-subcmd' \
+		'*::git-arg:->git-args'
+
+	case $state in
+		git-subcmd)
+			local -a git_subcommands
+			git_subcommands=(
+				"-h:Show this help text"
+				"--help:Show this help text"
+				"clone:Clone a package repository"
+				"commit:Commit to a package repository"
+				"config:Configure a clone according to artix specs"
+				"create:Create a new Gitea package repository"
+				"pull:Pull a package repository"
+				"push:Push a package repository"
+			)
+			_describe 'git-cmd' git_subcommands
+			return
+		;;
+		git-args)
+			case $words[1] in
+				clone)
+					_git_clone
+				;;
+				commit)
+					_git_commit
+				;;
+				config)
+					_git_config
+				;;
+				create)
+					_git_create
+				;;
+				pull)
+					_git_pull
+				;;
+				push)
+					_git_push
+				;;
+			esac
+		;;
+	esac
+}
+
+_repo() { 
+	local state
+	_arguments \
+		'1:repo-cmd:->repo-subcmd' \
+		'*::repo-arg:->repo-args'
+
+	case $state in
+		repo-subcmd)
+			local -a repo_subcommands
+			repo_subcommands=(
+				"-h:Show this help text"
+				"--help:Show this help text"
+				"add:Add built pkgbase to repo"
+				"move:Move built pkgbase between repos"
+				"remove:Remove built pkgbase from repo"
+				"import:Import latest tag from arch upstream"
+				"show:Show the pkgbase's repo db"
+			)
+			_describe 'repo-cmd' repo_subcommands
+		;;
+
+		repo-args)
+			case $words[1] in
+				add)
+					_repo_add
+				;;
+				move)
+					_repo_move
+				;;
+				remove)
+					_repo_remove
+				;;
+				import)
+					_repo_import
+				;;
+				show)
+					_repo_show
+				;;
+			esac
+		;;
+	esac
+}
+
+_admin_maintainer() { 
+	local state
+	_arguments \
+		'1:maintainer-cmd:->maintainer-subcmd' \
+		'*::maintainer-arg:->maintainer-args'
+
+	case $state in
+		maintainer-subcmd)
+			local -a maintainer_subcommands
+			maintainer_subcommands=(
+				"-h:Show this help text"
+				"--help:Show this help text"
+				"--adopt:Adopt repo"
+				"-a:Adopt repo"
+				"--orphan:Orphan repo"
+				"-o:Orphan repo"
+			)
+			_describe 'maintainer-cmd' maintainer_subcommands
+		;;
+		maintainer-args)
+			local -a localpkgs
+			localpkgs=(${(z)$(_artixpkg_pkgbase)})
+			case $words[1] in
+				--adopt|-a|--orphan|-o)
+					_describe 'locals-cmd' localpkgs
+				;;
+			esac
+		;;
+	esac
+}
+
+_admin_query() { 
+	local state
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	local -a query_subcommands
+	query_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--maintainer:Query for packages of the named maintainer"
+		"-m:Query for packages of the named maintainer"
+		"--topic:Query for packages of the named topic"
+		"-t:Query for packages of the named topic"
+	)
+
+	_arguments \
+		'1:query-cmd:->query-subcmd' \
+		'*::query-arg:->query-args'
+
+	case $state in
+		query-subcmd)
+			_describe 'query-cmd' query_subcommands -- localpkgs
+		;;
+		query-args)
+			local -a maintainers
+			maintainers=("${(z)$(_artixpkg_maintainers)}")
+			if [[ ${words[CURRENT-1]} == "-m" || ${words[CURRENT-1]} == "--maintainer" ]] then
+				_describe 'maintainers-cmd' maintainers
+			elif [[ ${words[CURRENT-1]} == "-t" || ${words[CURRENT-1]} == "--topic" ]] then
+				return 0
+			else
+				_describe 'query-cmd' query_subcommands -- localpkgs
+			fi
+		;;
+	esac;
+}
+
+_admin_team() { 
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	local state
+	local -a team_subcommands
+	team_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--check:Check if team is assigned"
+		"-c:Check if team is assigned"
+		"--list:List repo teams"
+		"-l:List repo teams"
+		"--add:Add team to repo"
+		"-a:Add team to repo"
+		"--remove:Remove team from repo"
+		"-r:Remove team from repo"
+	)
+
+	_arguments \
+		'1:team-cmd:->team-subcmd' \
+		'*::team-arg:->team-args'
+
+	case $state in
+		team-subcmd)
+			_describe 'team-cmd' team_subcommands -- localpkgs
+		;;
+		team-args)
+			local -a maintainers
+			maintainers=("${(z)$(_artixpkg_maintainers)}")
+			if [[ ${words[CURRENT-1]} == "-a" || ${words[CURRENT-1]} == "--add" || ${words[CURRENT-1]} == "-r" || ${words[CURRENT-1]} == "--remove" ]] then
+				_describe 'elses cmd' artix_teams
+			else
+				_describe 'query-cmd' team_subcommands -- localpkgs
+			fi
+		;;
+
+	esac
+}
+
+_admin_topic() { 
+	local state
+	local -a localpkgs
+	local -a topic_subcommands
+	topic_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--add:Add a topic to repo"
+		"-a:Add a topic to repo"
+		"--remove:Remove a topic from repo"
+		"-r:Remove a topic from repo"
+		"--delete:Delete all topics from repo"
+		"-d:Delete all topics from repo"
+		"--jobs:Run up to N jobs in parallel (default: 4)"
+		"-j:Run up to N jobs in parallel (default: 4)"
+	)
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+
+	_arguments \
+		'1:topic-cmd:->topic-subcmd' \
+		'*::topic-arg:->topic-args'
+
+	case $state in
+		topic-subcmd)
+			_describe 'topic-cmd' topic_subcommands -- localpkgs
+		;;
+		topic-args)
+			if [[ ${words[CURRENT-1]} == "-j" || ${words[CURRENT-1]} == "--jobs" || ${words[CURRENT-1]} == "-h" || ${words[CURRENT-1]} == "--help" || ${words[CURRENT-1]} == "-a" || ${words[CURRENT-1]} == "--add" || ${words[CURRENT-1]} == "-r" || ${words[CURRENT-1]} == "--remove" || ${words[CURRENT-1]} == "-d" || ${words[CURRENT-1]} == "--delete" ]] then
+				return 0
+			else
+				_describe 'topic-cmd' topic_subcommands -- localpkgs
+			fi
+		;;
+	esac
+}
+
+
+admin_transfer() { 
+	local state
+	local -a transfer_subcommands
+	transfer_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+	)
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+
+	_arguments \
+		'1:transfer-cmd:->transfer-subcmd' \
+		'*::transfer-arg:->transfer-args'
+
+	case $state in
+		transfer-subcmd)
+			_describe 'transfer-cmd' transfer_subcommands -- localpkgs
+		;;
+		transfer-args)
+			case $words[@] in
+				*)
+					_describe 'transfer_else-cmd' transfer_subcommands -- localpkgs
+				;;
+			esac
+		;;
+	esac
+}
+
+_git_clone() { 
+	local state
+	local -a remotepkgs
+	local -a clone_subcommands
+	clone_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--maintainer:Clone all packages of the named maintainer"
+		"-m:Clone all packages of the named maintainer"
+		"--search:Clone all packages of the named topic"
+		"-s:Clone all packages of the named topic"
+		"--team:Assign team name (default: world)"
+		"-t:Assign team name (default: world)"
+		"--jobs:Run up to N jobs in parallel (default: 4)"
+		"-j:Run up to N jobs in parallel (default: 4)"
+		"--protocol https:Clone the repository over https"
+		"--all:Clone all existing packages, useful for cache warming"
+	)
+
+	_arguments \
+		'1:clone-cmd:->clone-subcmd' \
+		'*::clone-arg:->clone-args'
+
+	case $state in
+		clone-subcmd)
+			remotepkgs=(${(z)$(_artixpkg_remotepkgbase)})
+
+			_describe 'clone-cmd' clone_subcommands -- remotepkgs
+		;;
+		clone-args)
+			case $words[@] in
+				*)
+					remotepkgs=(${(z)$(_artixpkg_remotepkgbase)})
+					_describe 'cloneall-cmd' clone_subcommands -- remotepkgs
+				;;
+			esac
+		;;
+	esac
+}
+
+_git_commit() {
+	local state
+	local -a commit_subcommands
+	commit_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--custom-mesage:Specify custom commit message instead of the default"
+		"-c:Specify custom commit message instead of the default"
+		"--maintainer:Commit all packages of the named maintainer"
+		"-m:Commit all packages of the named maintainer"
+		"--no-staging:Disable automatic adding/removing of files to staging"
+		"-n:Disable automatic adding/removing of files to staging"
+		"--preserve-pkgbase:Do not automatically edit pkgbase.yaml to disable building"
+		"-p:Do not automatically edit pkgbase.yaml to disable building"
+		"--topic:Commit all packages of the named topic"
+		"-t:Commit all packages of the named topic"
+	)
+
+	_arguments \
+		'1:commit-cmd:->commit-subcmd' \
+		'*::commit-arg:->commit-args'
+
+	case $state in
+		commit-subcmd)
+			_describe 'commit-cmd' commit_subcommands
+		;;
+		commit-args)
+			local -a maintainers
+			maintainers=("${(z)$(_artixpkg_maintainers)}")
+			if [[ ${words[CURRENT-1]} == "-m" || ${words[CURRENT-1]} == "--maintainer" ]] then
+				_describe 'maintainers-cmd' maintainers
+			elif [[ ${words[CURRENT-1]} == "-c" || ${words[CURRENT-1]} == "--custom-message" || ${words[CURRENT-1]} == "-t" || ${words[CURRENT-1]} == "--topic" ]] then
+				return 0
+			else
+				_describe 'query-cmd' commit_subcommands -- localpkgs
+			fi
+		;;
+	esac
+}
+
+_git_config() { 
+	local state
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	local -a config_subcommands
+	config_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--jobs:Run up to N jobs in parallel (default: 4)"
+		"-j:Run up to N jobs in parallel (default: 4)"
+		"--protocol:Configure remote url to use https"
+	)
+
+	_arguments \
+		'1:config-cmd:->config-subcmd' \
+		'*::config-arg:->config-args'
+
+	case $state in
+		config-subcmd)
+			_describe 'config-cmd' config_subcommands -- localpkgs
+		;;
+		config-args)
+			if [[ ${words[CURRENT-1]} == "--protocol" ]] then
+				all_completions=(
+					'https:HTTPS protocol'
+				)
+				_describe 'protocl val' all_completions
+			elif [[ ${words[CURRENT-1]} == "-j" || ${words[CURRENT-1]} == "--jobs" ]] then
+				return 0
+			else
+				_describe 'localpkgs-cmd' config_subcommands -- localpkgs
+			fi
+		;;
+	esac
+}
+
+_git_create() { 
+	local state
+	local -a create_subcommands
+	create_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--clone:Clone the Git repository after creation"
+		"-c:Clone the Git repository after creation"
+		"--team:Assign team name (default: world)"
+		"-t:Assign team name (default: world)"
+	)
+
+	_arguments \
+		'1:create-cmd:->create-subcmd' \
+		'*::create-arg:->create-args'
+
+	case $state in
+		create-subcmd)
+			_describe 'create-cmd' create_subcommands
+		;;
+		create-args)
+			if [[ ${words[CURRENT-1]} == "-t" || ${words[CURRENT-1]} == "--topic" ]] then
+				_describe 'teams-cmd' artix_teams
+			else
+				_describe 'create-cmd' create_subcommands
+			fi
+	esac
+}
+
+_git_pull() { 
+	local state
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	local -a pull_subcommands
+	pull_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--maintainer:Pull all packages of the named maintainer"
+		"-m:Pull all packages of the named maintainer"
+		"--topic:Pull all packages of the named topic"
+		"-t:Pull all packages of the named topic"
+		"--jobs:Run up to N jobs in parallel (default: 4)"
+		"-j:Run up to N jobs in parallel (default: 4)"
+		"--all:Pull all existing packages"
+	)
+
+	_arguments \
+		'1:pull-cmd:->pull-subcmd' \
+		'*::pull-arg:->pull-args'
+
+	case $state in
+		pull-subcmd)
+			_describe 'pull-cmd' pull_subcommands -- localpkgs
+		;;
+		pull-args)
+			if [[ ${words[CURRENT-1]} == "--all" ]] then
+				return 0
+			elif [[ ${words[CURRENT-1]} == "-m" || ${words[CURRENT-1]} == "--maintainer" ]] then
+				local -a maintainers
+				maintainers=("${(z)$(_artixpkg_maintainers)}")
+				_describe 'maintainers-cmd' maintainers
+			elif [[ ${words[CURRENT-1]} == "-j" || ${words[CURRENT-1]} == "--jobs" || ${words[CURRENT-1]} == "-t" || ${words[CURRENT-1]} == "--topic" ]] then
+				return 0
+			else
+				_describe 'pull-cmd' pull_subcommands -- localpkgs
+			fi
+		;;
+	esac
+}
+
+_git_push() {
+	local state
+	local -a push_subcommands
+	push_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--maintainer:Push all packages of the named maintainer"
+		"-m:Push all packages of the named maintainer"
+		"--topic:Push all packages of the named topic"
+		"-t:Push all packages of the named topic"
+	)
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	_arguments \
+		'1:push-cmd:->push-subcmd' \
+		'*::push-arg:->push-args'
+
+	case $state in
+		push-subcmd)
+			_describe 'push-cmd' push_subcommands -- localpkgs
+		;;
+		push-args)
+			if [[ ${words[CURRENT-1]} == "-m" || ${words[CURRENT-1]} == "--maintainer" ]] then
+				local -a maintainers
+				maintainers=("${(z)$(_artixpkg_maintainers)}")
+				_describe 'maintainers-cmd' maintainers
+			elif [[ ${words[CURRENT-1]} == "-t" || ${words[CURRENT-1]} == "--topic" ]] then
+				return 0
+			else
+				_describe 'push-cmd' push_subcommands -- localpkgs
+			fi
+		;;
+	esac
+}
+
+_repo_add() { 
+	local state
+	local -a add_subcommands
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	local -a combined_db
+	combined_db=($artix_db $artix_db_map)
+
+	add_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--push:Push pkgbase"
+		"-p:Push pkgbase"
+		"--rebuild:Triggers a rebuild"
+		"-r:Triggers a rebuild"
+		"--nocheck:Disable the check function"
+		"-n:Disable the check function"
+		"--agent:Set the CI agent"
+		"-a:Set the CI agent"
+	)
+
+	_arguments \
+		'1:add-cmd:->add-subcmd' \
+		'*::add-arg:->add-args'
+
+	case $state in
+		add-subcmd)
+			_describe 'add_cmd' add_subcommands -- artix_db -- artix_db_map
+		;;
+		add-args)
+			intersections=(${words:*combined_db})
+			if [[ ${words[CURRENT-1]} == "-a" || ${words[CURRENT-1]} == "--agent" ]] then
+				_describe 'add_cmd' agents
+			elif [[ ${#intersections} > 0 ]] then
+				_describe 'push-cmd' add_subcommands -- localpkgs
+			else
+				_describe 'add_cmd' add_subcommands -- combined_db
+			fi
+		;;
+	esac
+}
+
+_repo_move() { 
+	local state
+	local -a move_subcommands
+	local -a intersections
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+
+	move_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--push:Push pkgbase"
+		"-p:Push pkgbase"
+		"--agent:Set the CI agent"
+		"-a:Set the CI agent"
+	)
+	local -a combined_db
+	combined_db=($artix_db $artix_db_map)
+
+	_arguments \
+		'1:move-cmd:->move-subcmd' \
+		'*::move-arg:->move-args'
+
+	case $state in
+		move-subcmd)
+			_describe 'move_cmd' move_subcommands -- artix_db -- artix_db_map
+		;;
+		move-args)
+			intersections=(${words:*combined_db})
+			if [[ ${words[CURRENT-1]} == "-a" || ${words[CURRENT-1]} == "--agent" ]] then
+				_describe 'add_cmd' agents
+			elif (( ${#intersections} > 1 )) then
+				_describe 'push-cmd' move_subcommands -- localpkgs
+			else
+				_describe 'add_cmd' move_subcommands -- artix_db -- artix_db_map
+			fi
+		;;
+	esac
+}
+
+_repo_remove() { 
+	local state
+	local -a remove_subcommands
+	local -a intersections
+
+	remove_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--push:Push pkgbase"
+		"-p:Push pkgbase"
+		"--agent:Set the CI agent"
+		"-a:Set the CI agent"
+	)
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+	local -a combined_db
+	combined_db=($artix_db $artix_db_map)
+
+	_arguments \
+		'1:remove-cmd:->remove-subcmd' \
+		'*::remove-arg:->remove-args'
+
+	case $state in
+		remove-subcmd)
+			_describe 'remove_cmd' remove_subcommands -- combined_db
+		;;
+		remove-args)
+			intersections=(${words:*combined_db})
+			if [[ ${words[CURRENT-1]} == "-a" || ${words[CURRENT-1]} == "--agent" ]] then
+				_describe 'add_cmd' agents
+			elif [[ ${#intersections} > 0 ]] then
+				_describe 'push-cmd' remove_subcommands -- localpkgs
+			else
+				_describe 'add_cmd' remove_subcommands -- combined_db
+			fi
+		;;
+	esac
+}
+
+_repo_import() {
+	local state
+	local -a import_subcommands
+	import_subcommands=(
+		"-h:Show this help text"
+		"--help:Show this help text"
+		"--tag:Switch the current workspace to a specified version tag"
+		"--del:Delete files before rsync import"
+		"--no-patch:No patch import"
+		"-n:No patch import"
+		"--nexttag:Import oldest tag that is newer than the PKGBUILD"
+	)
+	local -a localpkgs
+	localpkgs=(${(z)$(_artixpkg_pkgbase)})
+
+	_arguments \
+		'1:import-cmd:->import-subcmd' \
+		'*::import-arg:->import-args'
+
+	case $state in
+		import-subcmd)
+			_describe 'import-cmd' import_subcommands -- localpkgs
+		;;
+		import-args)
+			if [[ ${words[CURRENT-1]} == "--tag" || ${words[CURRENT-1]} == "-tag" ]] then
+				return 0
+			else
+				_describe 'import-cmd' import_subcommands -- localpkgs
+			fi
+		;;
+	esac
+}
+
+_repo_show() {
+	local state
+	_arguments \
+		'1:show-cmd:->show-subcmd' \
+		'*::show-arg:->show-args'
+
+	case $state in
+		*)
+			local -a show_subcommands
+			show_subcommands=(
+				"-h:Show this help text"
+				"--help:Show this help text"
+				"--base:Show srcinfo base"
+				"-b:Show srcinfo base"
+				"--pkgs:Show srcinfo pkgs"
+				"-p:Show srcinfo pkgs"
+			)
+			_describe 'show-cmd' show_subcommands
+		;;
+	esac
+}
+
+_artixpkg "$@"
